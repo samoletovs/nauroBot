@@ -51,3 +51,15 @@ async def telegram_webhook(req: func.HttpRequest) -> func.HttpResponse:
 
     # Always 200 — a non-200 makes Telegram retry-storm on a handler bug.
     return func.HttpResponse(json.dumps(result), mimetype="application/json", status_code=200)
+
+
+@app.timer_trigger(schedule="0 */5 * * * *", arg_name="timer", run_on_startup=True)
+def keep_warm(timer: func.TimerRequest) -> None:
+    """Keep the Consumption instance warm so Telegram taps don't hit a cold-start 503.
+
+    Telegram drops a webhook update when the endpoint returns 503 (which a cold
+    Consumption worker does while spinning up), so an idle bot would silently miss
+    taps. A no-op timer every 5 minutes keeps one instance alive and responsive.
+    """
+    if timer.past_due:
+        log.info("keep_warm timer past due")

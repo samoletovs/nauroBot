@@ -71,10 +71,12 @@ async def _decline(
     await tg.answer_callback(callback_id, "Declined 👎")
     if message_id is not None:
         await tg.edit_reply_markup(chat_id, message_id, None)
-    # Invite an optional reason; the reply is captured by _handle_reply and fed to the generator.
+    # Invite an optional reason. The message carries the arf token so a reply to it is
+    # attributed back to the issue by _handle_reply and fed to the generator.
     await tg.send_message(
         chat_id,
-        "Noted. Reply with a reason and I'll teach the idea generator.",
+        f"Noted — declined. Reply to this message with a reason and I'll teach the idea "
+        f"generator to avoid it.\n\narf:{repo}:{num}",
         reply_to_message_id=message_id,
     )
     return {"ok": True, "action": "declined", "repo": repo, "num": num}

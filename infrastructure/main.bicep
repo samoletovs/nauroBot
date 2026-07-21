@@ -24,6 +24,9 @@ param allowedChatId string = ''
 @description('GitHub owner for NauroLabs project repos')
 param githubOwner string = 'samoletovs'
 
+@description('Salt appended to plan/app names to force a fresh instance when recovering from a wedged one')
+param instanceId string = ''
+
 var suffix = uniqueString(resourceGroup().id)
 var tags = {
   project: projectName
@@ -59,7 +62,7 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
 // ── Function App (Linux Consumption, Python 3.11). Stateless webhook, so the plan's
 //    ephemeral disk is fine. ──
 resource plan 'Microsoft.Web/serverfarms@2023-12-01' = {
-  name: '${projectName}-plan-${suffix}'
+  name: '${projectName}-plan-${suffix}${instanceId}'
   location: location
   tags: tags
   sku: { name: 'Y1', tier: 'Dynamic' }
@@ -68,7 +71,7 @@ resource plan 'Microsoft.Web/serverfarms@2023-12-01' = {
 }
 
 resource func 'Microsoft.Web/sites@2023-12-01' = {
-  name: '${projectName}-func-${suffix}'
+  name: '${projectName}-func-${suffix}${instanceId}'
   location: location
   tags: tags
   kind: 'functionapp,linux'
