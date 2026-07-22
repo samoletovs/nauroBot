@@ -134,3 +134,46 @@ class GitHub:
         issue_id = issue["repository"]["issue"]["id"]
         await self._graphql(_REPLACE_ACTORS, {"a": issue_id, "b": bot_id})
         return True
+
+    # ── Pull-request approval loop ─────────────────────────────────────────
+    # autoRefine cards a ready + CI-green Copilot PR to Telegram; a 👍 approves and
+    # squash-merges it, a 👎 closes it. Approving as the PAT user (who is not the PR
+    # author) is what unblocks the merge; squash matches the lab merge convention.
+
+    async def approve_pr(self, repo: str, num: int, body: str = "") -> None:
+        """Submit an APPROVE review on a PR (as the PAT user, who is not the author)."""
+        resp = await self._client.post(
+            f"{_REST}/repos/{self._owner}/{repo}/pulls/{num}/reviews",
+            headers=self._headers,
+            json={"event": "APPROVE", "body": body or "Approved via Telegram."},
+        )
+        resp.raise_for_status()
+
+    async def merge_pr(self, repo: str, num: int, method: str = "squash") -> tuple[bool, str]:
+        """Squash-merge a PR. Returns ``(merged, detail)``; a non-200 is reported, not raised.
+
+        GitHub returns 405 when the PR isn't mergeable (CI still running, a conflict, …)
+        and 409 when the head SHA moved — surface the message so the caller can tell the
+        human instead of failing silently.
+        """
+        resp = await self._client.put(
+            f"{_REST}/repos/{self._owner}/{repo}/pulls/{num}/merge",
+            headers=self._headers,
+            json={"merge_method": method},
+        )
+        if resp.status_code == 200:
+            return True, "merged"
+        try:
+            detail = resp.json().get("message", resp.text)
+        except (ValueError, KeyError):
+            detail = resp.text
+        return False, f"{resp.status_code}: {detail}"
+
+    async def close_pr(self, repo: str, num: int) -> None:
+        """Close a PR without merging (the 👎 path)."""
+        resp = await self._client.patch(
+            f"{_REST}/repos/{self._owner}/{repo}/pulls/{num}",
+            headers=self._headers,
+            json={"state": "closed"},
+        )
+        resp.raise_for_status()

@@ -40,6 +40,22 @@ def _parse_callback(data: str) -> Optional[tuple[str, int, str]]:
     return repo, int(raw_num), verdict
 
 
+# arfpr:<repo>:<pr-number> — the PR-approval card. A distinct namespace from arf: so the
+# idea and PR flows never collide ("arf:" never matches "arfpr:" and vice-versa).
+_ARFPR = re.compile(r"arfpr:([A-Za-z0-9_.-]+):(\d+)")
+
+
+def _parse_pr_callback(data: str) -> Optional[tuple[str, int, str]]:
+    """Parse ``arfpr:<repo>:<num>:<y|n>`` → ``(repo, num, verdict)`` or None if malformed."""
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "arfpr":
+        return None
+    _, repo, raw_num, verdict = parts
+    if verdict not in ("y", "n") or not raw_num.isdigit():
+        return None
+    return repo, int(raw_num), verdict
+
+
 def _authorised(chat_id: Any, allowed_chat: str) -> bool:
     """True when no allow-list is configured, or the chat matches it."""
     return not allowed_chat or str(chat_id) == str(allowed_chat)
@@ -82,6 +98,50 @@ async def _decline(
     return {"ok": True, "action": "declined", "repo": repo, "num": num}
 
 
+async def _approve_pr(
+    gh: GitHub, tg: Telegram, repo: str, num: int, callback_id: str, chat_id: Any,
+    message_id: Optional[int],
+) -> dict[str, Any]:
+    """👍 on a PR card: approve the PR (as the PAT user), then squash-merge it.
+
+    The card is only sent once CI is green, so the merge normally succeeds on the first
+    tap. If GitHub still refuses (CI regressed, a fresh conflict), the approval stays in
+    place and the human is told why — the card keeps its buttons so they can tap again.
+    """
+    try:
+        await gh.approve_pr(repo, num)
+    except Exception:  # noqa: BLE001 — a review hiccup must not 500 the webhook
+        log.exception("approve_pr failed for %s#%s", repo, num)
+    merged, detail = await gh.merge_pr(repo, num)
+    if merged:
+        await gh.comment(repo, num, "Approved + squash-merged via Telegram. 🚢")
+        await tg.answer_callback(callback_id, "Merged 🚢")
+        if message_id is not None:
+            await tg.edit_reply_markup(chat_id, message_id, None)
+        return {"ok": True, "action": "merged", "repo": repo, "num": num}
+    await tg.answer_callback(callback_id, "Approved — not mergeable yet")
+    await tg.send_message(
+        chat_id,
+        f"👍 Approved {repo}#{num}, but GitHub won't merge it yet:\n{detail}\n\n"
+        f"Tap ✅ again once CI is green.\n\narfpr:{repo}:{num}",
+        reply_to_message_id=message_id,
+    )
+    return {"ok": True, "action": "approved_unmerged", "repo": repo, "num": num, "detail": detail}
+
+
+async def _decline_pr(
+    gh: GitHub, tg: Telegram, repo: str, num: int, callback_id: str, chat_id: Any,
+    message_id: Optional[int],
+) -> dict[str, Any]:
+    """👎 on a PR card: close the PR without merging."""
+    await gh.comment(repo, num, "Closed via Telegram (not merged).")
+    await gh.close_pr(repo, num)
+    await tg.answer_callback(callback_id, "Closed 👎")
+    if message_id is not None:
+        await tg.edit_reply_markup(chat_id, message_id, None)
+    return {"ok": True, "action": "pr_closed", "repo": repo, "num": num}
+
+
 async def _handle_callback(
     cq: dict[str, Any], tg: Telegram, gh: GitHub, allowed_chat: str
 ) -> dict[str, Any]:
@@ -92,7 +152,15 @@ async def _handle_callback(
     if not _authorised(chat_id, allowed_chat):
         await tg.answer_callback(callback_id, "Not authorised")
         return {"ok": False, "error": "unauthorised"}
-    parsed = _parse_callback(cq.get("data") or "")
+    data = cq.get("data") or ""
+    # PR-approval card (arfpr:) is a distinct namespace from the idea card (arf:).
+    pr_parsed = _parse_pr_callback(data)
+    if pr_parsed is not None:
+        repo, num, verdict = pr_parsed
+        if verdict == "y":
+            return await _approve_pr(gh, tg, repo, num, callback_id, chat_id, message_id)
+        return await _decline_pr(gh, tg, repo, num, callback_id, chat_id, message_id)
+    parsed = _parse_callback(data)
     if parsed is None:
         await tg.answer_callback(callback_id)
         return {"ok": True, "action": "ignored"}

@@ -98,5 +98,56 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
                 await gh.assign_copilot("era", 12)
 
 
+class PrOpsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_approve_pr_posts_approve_review(self):
+        seen = {}
+
+        def handler(request):
+            seen["path"] = request.url.path
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": 1})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gh = GitHub("tok", "samoletovs", client)
+            await gh.approve_pr("era", 12)
+        self.assertTrue(seen["path"].endswith("/repos/samoletovs/era/pulls/12/reviews"))
+        self.assertEqual(seen["body"]["event"], "APPROVE")
+
+    async def test_merge_pr_success_uses_squash(self):
+        seen = {}
+
+        def handler(request):
+            seen["method"] = request.method
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"merged": True, "sha": "abc"})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gh = GitHub("tok", "samoletovs", client)
+            merged, detail = await gh.merge_pr("era", 12)
+        self.assertTrue(merged)
+        self.assertEqual(detail, "merged")
+        self.assertEqual(seen["method"], "PUT")
+        self.assertEqual(seen["body"]["merge_method"], "squash")
+
+    async def test_merge_pr_reports_405(self):
+        def handler(request):
+            return httpx.Response(405, json={"message": "Pull Request is not mergeable"})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gh = GitHub("tok", "samoletovs", client)
+            merged, detail = await gh.merge_pr("era", 12)
+        self.assertFalse(merged)
+        self.assertIn("405", detail)
+        self.assertIn("not mergeable", detail)
+
+    async def test_close_pr_sets_closed(self):
+        seen = {}
+
+        def handler(request):
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gh = GitHub("tok", "samoletovs", client)
+            await gh.close_pr("era", 12)
+        self.assertEqual(seen["body"], {"state": "closed"})
+
+
 if __name__ == "__main__":
     unittest.main()
