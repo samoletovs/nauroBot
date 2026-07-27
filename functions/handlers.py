@@ -6,6 +6,7 @@ and the card text carries the same ``arf:<repo>:<num>`` token so a text *reply* 
 can be attributed back to the issue.
 
 - 👍 → drop ``needs-approval``, add ``approved``, assign the Copilot agent → build starts.
+- 🅿️ → drop ``needs-approval``, add ``parked``, keep the issue open as a stepping-stone.
 - 👎 → drop ``needs-approval``, add ``declined``, close the issue, invite a reason.
 - reply to a card → logged as a feedback comment on the issue. autoRefine reads the reasons
   on declined ideas and feeds them back into the generator so it proposes differently.
@@ -19,7 +20,7 @@ import logging
 import re
 from typing import Any, Optional
 
-from config import LABEL_APPROVED, LABEL_DECLINED, LABEL_NEEDS_APPROVAL
+from config import LABEL_APPROVED, LABEL_DECLINED, LABEL_NEEDS_APPROVAL, LABEL_PARKED
 from github_ops import GitHub
 from telegram import Telegram
 
@@ -30,12 +31,12 @@ _ARF = re.compile(r"arf:([A-Za-z0-9_.-]+):(\d+)")
 
 
 def _parse_callback(data: str) -> Optional[tuple[str, int, str]]:
-    """Parse ``arf:<repo>:<num>:<y|n>`` → ``(repo, num, verdict)`` or None if malformed."""
+    """Parse ``arf:<repo>:<num>:<y|p|n>`` → ``(repo, num, verdict)`` or None if malformed."""
     parts = data.split(":")
     if len(parts) != 4 or parts[0] != "arf":
         return None
     _, repo, raw_num, verdict = parts
-    if verdict not in ("y", "n") or not raw_num.isdigit():
+    if verdict not in ("y", "p", "n") or not raw_num.isdigit():
         return None
     return repo, int(raw_num), verdict
 
@@ -96,6 +97,24 @@ async def _decline(
         reply_to_message_id=message_id,
     )
     return {"ok": True, "action": "declined", "repo": repo, "num": num}
+
+
+async def _park(
+    gh: GitHub, tg: Telegram, repo: str, num: int, callback_id: str, chat_id: Any,
+    message_id: Optional[int],
+) -> dict[str, Any]:
+    """🅿️ on an idea card: keep it, but not now.
+
+    Drop ``needs-approval``, add ``parked``, and leave the issue OPEN as a stepping-stone
+    (EVOLUTION.md §2 archive) — no Copilot, no close. A later harvest or scan can revive it.
+    """
+    await gh.remove_label(repo, num, LABEL_NEEDS_APPROVAL)
+    await gh.add_labels(repo, num, [LABEL_PARKED])
+    await gh.comment(repo, num, "Parked via Telegram — kept as a stepping-stone (still open).")
+    await tg.answer_callback(callback_id, "Parked 🅿️")
+    if message_id is not None:
+        await tg.edit_reply_markup(chat_id, message_id, None)
+    return {"ok": True, "action": "parked", "repo": repo, "num": num}
 
 
 async def _approve_pr(
@@ -167,6 +186,8 @@ async def _handle_callback(
     repo, num, verdict = parsed
     if verdict == "y":
         return await _approve(gh, tg, repo, num, callback_id, chat_id, message_id)
+    if verdict == "p":
+        return await _park(gh, tg, repo, num, callback_id, chat_id, message_id)
     return await _decline(gh, tg, repo, num, callback_id, chat_id, message_id)
 
 

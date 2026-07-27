@@ -27,7 +27,9 @@ GITHUB_TOKEN: str = os.getenv("GH_ASSIGN_PAT", "")
 GITHUB_OWNER: str = os.getenv("NAURO_GITHUB_OWNER", "samoletovs")
 
 # Labels that model the idea lifecycle. autoRefine files ideas as ``needs-approval``;
-# a 👍 moves them to ``approved`` (and assigns Copilot), a 👎 to ``declined``.
+# a 👍 moves them to ``approved`` (and assigns Copilot), a 👎 to ``declined``, and a
+# 🅿️ to ``parked`` (kept open as a stepping-stone — neither built nor closed).
 LABEL_NEEDS_APPROVAL: str = "needs-approval"
 LABEL_APPROVED: str = "approved"
 LABEL_DECLINED: str = "declined"
+LABEL_PARKED: str = "parked"

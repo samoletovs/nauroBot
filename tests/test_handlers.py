@@ -28,6 +28,9 @@ class ParseCallbackTests(unittest.TestCase):
     def test_valid_no(self):
         self.assertEqual(_parse_callback("arf:amberRepublic:3:n"), ("amberRepublic", 3, "n"))
 
+    def test_valid_park(self):
+        self.assertEqual(_parse_callback("arf:era:12:p"), ("era", 12, "p"))
+
     def test_wrong_prefix_rejected(self):
         self.assertIsNone(_parse_callback("hs:1:era:12"))
 
@@ -67,6 +70,15 @@ class HandleCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.gh.close_issue.assert_awaited_once()
         self.gh.assign_copilot.assert_not_awaited()
         self.tg.send_message.assert_awaited_once()  # invites a reason
+
+    async def test_park_relabels_keeps_open(self):
+        result = await handle_update(_callback_update("arf:era:12:p"), self.tg, self.gh, "42")
+        self.assertEqual(result["action"], "parked")
+        self.gh.add_labels.assert_awaited_once_with("era", 12, ["parked"])
+        self.gh.remove_label.assert_awaited_once_with("era", 12, "needs-approval")
+        self.gh.close_issue.assert_not_awaited()
+        self.gh.assign_copilot.assert_not_awaited()
+        self.tg.edit_reply_markup.assert_awaited_once()
 
     async def test_unauthorised_chat_rejected(self):
         result = await handle_update(
