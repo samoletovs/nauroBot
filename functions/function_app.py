@@ -18,6 +18,11 @@ from telegram import Telegram
 app = func.FunctionApp()
 log = logging.getLogger("naurobot")
 
+# httpx logs the full request URL at INFO, and the Telegram API carries the bot token in
+# the path — which writes the live token into Application Insights, where it is retained.
+# No request detail here is worth a leaked credential.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 @app.route(route="telegram", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
 async def telegram_webhook(req: func.HttpRequest) -> func.HttpResponse:
