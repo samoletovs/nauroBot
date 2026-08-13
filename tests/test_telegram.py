@@ -36,6 +36,66 @@ class SendMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(mid)
 
 
+class TokenNeverReachesTheLogTests(unittest.IsolatedAsyncioTestCase):
+    """The token lives in the request path, so any httpx error text leaks it.
+
+    httpx.HTTPStatusError renders as "... for url 'https://api.telegram.org/bot<TOKEN>/...'".
+    Handlers log these with log.exception, which wrote the live credential into Application
+    Insights - 92 records before this was caught. Assert on the whole exception chain,
+    because a chained __cause__ is printed by the traceback just as loudly.
+    """
+
+    SECRET = "123456:AAHsuperSecretTokenValue"
+
+    def _chain_text(self, exc: BaseException) -> str:
+        parts, seen = [], set()
+        while exc is not None and id(exc) not in seen:
+            seen.add(id(exc))
+            parts.append(f"{exc!r} {exc}")
+            exc = exc.__cause__ or exc.__context__
+        return " ".join(parts)
+
+    async def test_http_error_is_reraised_without_the_token(self):
+        def handler(request):
+            return httpx.Response(400, json={"ok": False, "description": "bad request"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            tg = Telegram(self.SECRET, client)
+            with self.assertRaises(Exception) as caught:
+                await tg._call("editMessageReplyMarkup", {"chat_id": 1})
+
+        text = self._chain_text(caught.exception)
+        self.assertNotIn(self.SECRET, text)
+        self.assertNotIn("api.telegram.org", text)
+        self.assertIn("editMessageReplyMarkup", text)
+
+    async def test_transport_error_is_reraised_without_the_token(self):
+        def handler(request):
+            raise httpx.ConnectError("boom", request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            tg = Telegram(self.SECRET, client)
+            with self.assertRaises(Exception) as caught:
+                await tg._call("sendMessage", {"chat_id": 1})
+
+        text = self._chain_text(caught.exception)
+        self.assertNotIn(self.SECRET, text)
+
+    async def test_handler_log_output_carries_no_token(self):
+        # The chain assertions above are the mechanism; this is the actual contract -
+        # what a public method writes to the log when Telegram rejects the call.
+        def handler(request):
+            return httpx.Response(400, json={"ok": False})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            tg = Telegram(self.SECRET, client)
+            with self.assertLogs("naurobot.telegram", level="ERROR") as captured:
+                await tg.edit_reply_markup(1, 2, None)
+
+        self.assertNotIn(self.SECRET, "\n".join(captured.output))
+        self.assertNotIn("api.telegram.org", "\n".join(captured.output))
+
+
 class AnswerCallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_posts_expected_payload(self):
         seen = {}

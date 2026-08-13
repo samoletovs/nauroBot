@@ -16,6 +16,10 @@ log = logging.getLogger("naurobot.telegram")
 _API = "https://api.telegram.org/bot{token}/{method}"
 
 
+class TelegramError(RuntimeError):
+    """A Telegram call failed, described without the token-bearing URL."""
+
+
 class Telegram:
     """Thin wrapper over the Telegram Bot API bound to one bot token + HTTP client."""
 
@@ -25,8 +29,20 @@ class Telegram:
 
     async def _call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = _API.format(token=self._token, method=method)
-        resp = await self._client.post(url, json=payload)
-        resp.raise_for_status()
+        detail: object = None
+        try:
+            resp = await self._client.post(url, json=payload)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            # httpx repeats the request URL in its exception text and the bot token sits in
+            # that path, so `log.exception` up the stack wrote the live credential into
+            # Application Insights. `raise ... from None` is not enough: it clears __cause__
+            # but leaves __context__ pointing at the original, which telemetry may still
+            # serialise. Raising outside the handler means no chain is recorded at all.
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            detail = status if status is not None else type(exc).__name__
+        if detail is not None:
+            raise TelegramError(f"{method} failed: {detail}")
         return resp.json()
 
     async def answer_callback(self, callback_id: str, text: str = "") -> None:
