@@ -1,0 +1,56 @@
+name: Tests
+
+# nauroBot is the lab's Telegram bridge - it acts on GitHub through a PAT, so its handler tests guard code that can change repositories.
+#
+# The suite existed and no workflow ran it. A sweep on 2026-08-20 found 10 of
+# 25 projects in this state - test files present, never executed - so the repo
+# reported the assurance of having tests while providing none of it.
+#
+# No cron, so this adds nothing to the schedule ceiling in
+# nauroLabs-github/config/schedule-budget.json. Path-filtered because this repo
+# is private and its minutes come out of the monthly allowance.
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - "functions/**"
+      - "scripts/**"
+      - "tests/**"
+      - "functions/requirements.txt"
+      - ".github/workflows/tests.yml"
+  pull_request:
+    paths:
+      - "functions/**"
+      - "scripts/**"
+      - "tests/**"
+      - "functions/requirements.txt"
+      - ".github/workflows/tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: functions/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r functions/requirements.txt pytest
+
+      - name: Run tests
+        run: python -m pytest tests -q
