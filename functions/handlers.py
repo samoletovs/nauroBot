@@ -132,9 +132,13 @@ async def _approve_pr(
     Anything that is not positively green (failing, pending, no checks, or an unresolvable
     rollup) refuses the merge and tells the human why. The card keeps its buttons so they
     can tap again once CI settles.
+
+    The merge is pinned to the exact commit whose checks were read, so a push that lands
+    between the check and the merge produces a 409 rather than silently merging a head
+    nobody verified.
     """
-    state, detail = await gh.checks_state(repo, num)
-    if state != "passing":
+    checks = await gh.checks_state(repo, num)
+    if checks.state != "passing":
         # Each case gets its own next step. A gate whose only advice is "tap again"
         # is a dead end when the PR has no CI at all, and a gate people can't satisfy
         # is a gate people route around.
@@ -157,25 +161,27 @@ async def _approve_pr(
                 "Treating that as not-green on purpose. Check the PR on GitHub.",
             ),
         }
-        reason, next_step = guidance.get(state, ("CI is not green", "Check the PR on GitHub."))
+        reason, next_step = guidance.get(
+            checks.state, ("CI is not green", "Check the PR on GitHub.")
+        )
         await tg.answer_callback(callback_id, f"Not merged — {reason}")
         await tg.send_message(
             chat_id,
-            f"🛑 Refused to merge {repo}#{num}: {reason}.\n{detail}\n\n"
+            f"🛑 Refused to merge {repo}#{num}: {reason}.\n{checks.detail}\n\n"
             f"Nothing was approved or merged.\n{next_step}\n\n"
             f"arfpr:{repo}:{num}",
             reply_to_message_id=message_id,
         )
         return {
             "ok": True, "action": "merge_refused", "repo": repo, "num": num,
-            "checks": state, "detail": detail,
+            "checks": checks.state, "detail": checks.detail,
         }
 
     try:
         await gh.approve_pr(repo, num)
     except Exception:  # noqa: BLE001 — a review hiccup must not 500 the webhook
         log.exception("approve_pr failed for %s#%s", repo, num)
-    merged, detail = await gh.merge_pr(repo, num)
+    merged, detail = await gh.merge_pr(repo, num, sha=checks.sha)
     if merged:
         await gh.comment(repo, num, "Approved + squash-merged via Telegram. 🚢")
         await tg.answer_callback(callback_id, "Merged 🚢")
@@ -186,7 +192,8 @@ async def _approve_pr(
     await tg.send_message(
         chat_id,
         f"👍 Approved {repo}#{num}, but GitHub won't merge it yet:\n{detail}\n\n"
-        f"Tap ✅ again once CI is green.\n\narfpr:{repo}:{num}",
+        f"Tap ✅ again once CI is green — if new commits landed, the next tap re-checks "
+        f"them.\n\narfpr:{repo}:{num}",
         reply_to_message_id=message_id,
     )
     return {"ok": True, "action": "approved_unmerged", "repo": repo, "num": num, "detail": detail}
