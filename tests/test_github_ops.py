@@ -189,3 +189,72 @@ class ChecksStateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_http_error_is_unknown_not_passing(self):
         self.assertEqual((await self._state(httpx.Response(500, text="boom")))[0], "unknown")
+
+    async def test_missing_pull_request_is_unknown(self):
+        # PR deleted, repo renamed, or the PAT lost access: `data` is present, PR is null.
+        resp = httpx.Response(200, json={"data": {"repository": {"pullRequest": None}}})
+        self.assertEqual((await self._state(resp))[0], "unknown")
+
+    async def test_empty_commit_list_is_unknown(self):
+        resp = httpx.Response(200, json={"data": {"repository": {"pullRequest": {
+            "commits": {"nodes": []}}}}})
+        self.assertEqual((await self._state(resp))[0], "unknown")
+
+    async def test_missing_state_key_is_unknown(self):
+        resp = httpx.Response(200, json={"data": {"repository": {"pullRequest": {
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": {}}}]}}}}})
+        self.assertEqual((await self._state(resp))[0], "unknown")
+
+    async def test_non_object_payload_is_unknown_and_does_not_raise(self):
+        # Valid JSON that isn't an object. checks_state must *return* a state, never raise:
+        # an escaping exception is caught by the webhook's catch-all, so the human's tap
+        # would silently do nothing instead of showing a refusal they can act on.
+        self.assertEqual((await self._state(httpx.Response(200, json=["nope"])))[0], "unknown")
+
+    async def test_no_payload_shape_can_raise_or_read_green(self):
+        """checks_state must *return* a verdict for any body, never raise.
+
+        An exception here does not reach the user: the webhook's catch-all swallows it,
+        so the human's tap looks like it did nothing and they tap again. Both properties
+        are asserted together because a payload that raises is also a payload that was
+        never judged not-green.
+        """
+        hostile = [
+            {"errors": ["a bare string, not an object"]},
+            {"errors": [{"no_message_key": 1}]},
+            {"errors": "not even a list"},
+            {"data": None},
+            {"data": {"repository": None}},
+            {"data": {"repository": {"pullRequest": {"commits": None}}}},
+            {"data": {"repository": {"pullRequest": {
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": "SUCCESS"}}]}}}}},
+            {"data": {"repository": {"pullRequest": {
+                "commits": {"nodes": [{"commit": None}]}}}}},
+            {},
+        ]
+        for body in hostile:
+            with self.subTest(body=body):
+                verdict, detail = await self._state(httpx.Response(200, json=body))
+                self.assertNotEqual(verdict, "passing")
+                self.assertTrue(detail)
+
+    async def test_only_success_is_ever_passing(self):
+        """The whole guarantee in one test: nothing but an explicit SUCCESS reads green.
+
+        This asserts the requirement, not the implementation — it fails if anyone widens
+        the state table, including for a GitHub enum member that does not exist yet. The
+        last five are CheckConclusionState values that should never surface as a rollup
+        state; if GitHub ever leaked one through, the gate must still refuse.
+        """
+        never_green = [
+            "FAILURE", "ERROR", "PENDING", "EXPECTED", "", None, "SOMETHING_GITHUB_ADDS",
+            "NEUTRAL", "SKIPPED", "CANCELLED", "ACTION_REQUIRED", "TIMED_OUT",
+        ]
+        for rollup_state in never_green:
+            with self.subTest(rollup=rollup_state):
+                verdict, _ = await self._state(self._rollup(rollup_state))
+                self.assertNotEqual(verdict, "passing")
+
+
+if __name__ == "__main__":
+    unittest.main()

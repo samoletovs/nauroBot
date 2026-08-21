@@ -43,6 +43,19 @@ mutation($a:ID!,$b:ID!){
 }
 """
 
+# GitHub's StatusState enum → our verdict. **Anything absent from this table is
+# `unknown`, and `unknown` is never green.** That default is the security property:
+# if GitHub adds an enum member, or returns one we misread, the merge gate refuses
+# rather than guessing. Widening this table is a security change — the
+# `test_only_success_is_ever_passing` test exists to make that deliberate.
+_ROLLUP_STATES = {
+    "SUCCESS": "passing",
+    "EXPECTED": "pending",
+    "PENDING": "pending",
+    "FAILURE": "failing",
+    "ERROR": "failing",
+}
+
 
 class GitHub:
     """Issue operations against ``{owner}/{repo}`` using a user PAT + shared HTTP client."""
@@ -191,29 +204,32 @@ class GitHub:
             log.warning("checks_state failed for %s#%s: %s", repo, num, exc)
             return "unknown", str(exc)
 
-        if payload.get("errors"):
-            detail = "; ".join(e.get("message", "") for e in payload["errors"])
-            log.warning("checks_state GraphQL errors for %s#%s: %s", repo, num, detail)
-            return "unknown", detail
+        if not isinstance(payload, dict):
+            # Valid JSON that isn't an object (a proxy or captive-portal error page).
+            # This method's contract is that it always *returns* a state and never raises:
+            # an escaping exception is swallowed by the webhook's catch-all, so the human
+            # would see the tap do nothing at all rather than a refusal they can act on.
+            return "unknown", f"unexpected response body ({type(payload).__name__})"
 
         try:
+            if payload.get("errors"):
+                detail = "; ".join(str(e.get("message", e)) for e in payload["errors"])
+                log.warning("checks_state GraphQL errors for %s#%s: %s", repo, num, detail)
+                return "unknown", detail
+
             nodes = payload["data"]["repository"]["pullRequest"]["commits"]["nodes"]
             rollup = nodes[0]["commit"]["statusCheckRollup"]
-        except (KeyError, IndexError, TypeError):
-            return "unknown", "no commit rollup in response"
+            if rollup is None:
+                return "none", "no checks configured on the head commit"
+            state = str(rollup.get("state") or "").upper()
+        except (AttributeError, KeyError, IndexError, TypeError) as exc:
+            # Every unexpected shape lands here, and every one of them is `unknown`.
+            # This is why the whole parse sits inside the try rather than only the
+            # subscript chain: a malformed `errors` entry or a non-object rollup would
+            # otherwise raise past the guard, and a raised exception is not a refusal.
+            return "unknown", f"unreadable rollup response ({type(exc).__name__})"
 
-        if rollup is None:
-            return "none", "no checks configured on the head commit"
-
-        state = (rollup.get("state") or "").upper()
-        mapping = {
-            "SUCCESS": "passing",
-            "EXPECTED": "pending",
-            "PENDING": "pending",
-            "FAILURE": "failing",
-            "ERROR": "failing",
-        }
-        return mapping.get(state, "unknown"), state or "empty state"
+        return _ROLLUP_STATES.get(state, "unknown"), state or "empty state"
 
     async def merge_pr(self, repo: str, num: int, method: str = "squash") -> tuple[bool, str]:
         """Squash-merge a PR. Returns ``(merged, detail)``; a non-200 is reported, not raised.
