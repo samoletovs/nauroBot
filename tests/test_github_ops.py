@@ -149,5 +149,43 @@ class PrOpsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen["body"], {"state": "closed"})
 
 
-if __name__ == "__main__":
-    unittest.main()
+class ChecksStateTests(unittest.IsolatedAsyncioTestCase):
+    """The CI rollup must resolve to a state, and must never guess 'passing'."""
+
+    async def _state(self, response):
+        def handler(request):
+            return response
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gh = GitHub("tok", "samoletovs", client)
+            return await gh.checks_state("era", 12)
+
+    def _rollup(self, state):
+        return httpx.Response(200, json={"data": {"repository": {"pullRequest": {
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": state}}}]}}}}})
+
+    async def test_success_is_passing(self):
+        self.assertEqual((await self._state(self._rollup("SUCCESS")))[0], "passing")
+
+    async def test_failure_is_failing(self):
+        self.assertEqual((await self._state(self._rollup("FAILURE")))[0], "failing")
+
+    async def test_error_is_failing(self):
+        self.assertEqual((await self._state(self._rollup("ERROR")))[0], "failing")
+
+    async def test_pending_is_pending(self):
+        self.assertEqual((await self._state(self._rollup("PENDING")))[0], "pending")
+
+    async def test_absent_rollup_is_none_not_passing(self):
+        resp = httpx.Response(200, json={"data": {"repository": {"pullRequest": {
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]}}}}})
+        self.assertEqual((await self._state(resp))[0], "none")
+
+    async def test_graphql_errors_are_unknown(self):
+        resp = httpx.Response(200, json={"errors": [{"message": "Bad credentials"}]})
+        state, detail = await self._state(resp)
+        self.assertEqual(state, "unknown")
+        self.assertIn("Bad credentials", detail)
+
+    async def test_http_error_is_unknown_not_passing(self):
+        self.assertEqual((await self._state(httpx.Response(500, text="boom")))[0], "unknown")

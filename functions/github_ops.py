@@ -149,6 +149,72 @@ class GitHub:
         )
         resp.raise_for_status()
 
+    async def checks_state(self, repo: str, num: int) -> tuple[str, str]:
+        """Resolve the CI rollup for a PR's head commit. Returns ``(state, detail)``.
+
+        ``state`` is one of ``passing`` / ``failing`` / ``pending`` / ``none`` / ``unknown``.
+
+        This is a **client-side** gate and it is not redundant with GitHub's own 405.
+        Relying on the 405 assumes the target repo has branch protection with required
+        status checks; audited 2026-08-21, **no NauroLabs repo actually requires checks**
+        (12 of 17 have no protection at all, the rest declare no contexts). With no
+        required check, GitHub merges a red-CI PR and returns 200 — so the 405 path can
+        never fire for the case it was trusted to catch.
+
+        ``none`` (a PR with no checks at all) is deliberately *not* treated as passing;
+        the caller decides, so a repo without CI cannot silently look green.
+        """
+        query = """
+        query($o:String!,$n:String!,$num:Int!){
+          repository(owner:$o,name:$n){
+            pullRequest(number:$num){
+              commits(last:1){ nodes{ commit{
+                statusCheckRollup{ state }
+              } } }
+            }
+          }
+        }
+        """
+        try:
+            resp = await self._client.post(
+                _GRAPHQL,
+                headers=self._headers,
+                json={
+                    "query": query,
+                    "variables": {"o": self._owner, "n": repo, "num": num},
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            # Fail closed at the call site: an unresolvable rollup must not read as green.
+            log.warning("checks_state failed for %s#%s: %s", repo, num, exc)
+            return "unknown", str(exc)
+
+        if payload.get("errors"):
+            detail = "; ".join(e.get("message", "") for e in payload["errors"])
+            log.warning("checks_state GraphQL errors for %s#%s: %s", repo, num, detail)
+            return "unknown", detail
+
+        try:
+            nodes = payload["data"]["repository"]["pullRequest"]["commits"]["nodes"]
+            rollup = nodes[0]["commit"]["statusCheckRollup"]
+        except (KeyError, IndexError, TypeError):
+            return "unknown", "no commit rollup in response"
+
+        if rollup is None:
+            return "none", "no checks configured on the head commit"
+
+        state = (rollup.get("state") or "").upper()
+        mapping = {
+            "SUCCESS": "passing",
+            "EXPECTED": "pending",
+            "PENDING": "pending",
+            "FAILURE": "failing",
+            "ERROR": "failing",
+        }
+        return mapping.get(state, "unknown"), state or "empty state"
+
     async def merge_pr(self, repo: str, num: int, method: str = "squash") -> tuple[bool, str]:
         """Squash-merge a PR. Returns ``(merged, detail)``; a non-200 is reported, not raised.
 

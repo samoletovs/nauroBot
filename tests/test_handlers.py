@@ -164,6 +164,7 @@ class HandlePrCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.tg = AsyncMock(spec=Telegram)
         self.gh = AsyncMock(spec=GitHub)
         self.gh.merge_pr.return_value = (True, "merged")
+        self.gh.checks_state.return_value = ("passing", "SUCCESS")
 
     def _pr_update(self, data, chat_id=42, message_id=7):
         return {
@@ -210,6 +211,41 @@ class HandlePrCallbackTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(result["ok"])
         self.gh.approve_pr.assert_not_awaited()
+        self.gh.merge_pr.assert_not_awaited()
+
+    # ── CI gate ──────────────────────────────────────────────────────────────
+    # These assert the *requirement* (a PR that is not green is never merged), so they
+    # fail if the gate is removed — not merely if the code is reshaped. Without the gate
+    # every one of these cases merges, because no NauroLabs repo requires status checks
+    # and GitHub therefore returns 200 rather than the 405 the old path relied on.
+
+    async def test_red_ci_is_never_merged_or_approved(self):
+        self.gh.checks_state.return_value = ("failing", "FAILURE")
+        result = await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
+        self.assertEqual(result["action"], "merge_refused")
+        self.gh.merge_pr.assert_not_awaited()
+        self.gh.approve_pr.assert_not_awaited()
+        self.gh.comment.assert_not_awaited()
+        self.tg.send_message.assert_awaited_once()
+        self.tg.edit_reply_markup.assert_not_awaited()  # keep buttons for a retry
+
+    async def test_pending_ci_is_not_merged(self):
+        self.gh.checks_state.return_value = ("pending", "PENDING")
+        result = await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
+        self.assertEqual(result["action"], "merge_refused")
+        self.gh.merge_pr.assert_not_awaited()
+
+    async def test_pr_without_checks_is_not_merged(self):
+        # A repo with no CI must not read as green — that is the silent-failure case.
+        self.gh.checks_state.return_value = ("none", "no checks configured")
+        result = await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
+        self.assertEqual(result["action"], "merge_refused")
+        self.gh.merge_pr.assert_not_awaited()
+
+    async def test_unreadable_ci_fails_closed(self):
+        self.gh.checks_state.return_value = ("unknown", "network error")
+        result = await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
+        self.assertEqual(result["action"], "merge_refused")
         self.gh.merge_pr.assert_not_awaited()
 
 
