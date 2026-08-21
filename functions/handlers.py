@@ -121,17 +121,67 @@ async def _approve_pr(
     gh: GitHub, tg: Telegram, repo: str, num: int, callback_id: str, chat_id: Any,
     message_id: Optional[int],
 ) -> dict[str, Any]:
-    """👍 on a PR card: approve the PR (as the PAT user), then squash-merge it.
+    """👍 on a PR card: verify CI is green, then approve (as the PAT user) and squash-merge.
 
-    The card is only sent once CI is green, so the merge normally succeeds on the first
-    tap. If GitHub still refuses (CI regressed, a fresh conflict), the approval stays in
-    place and the human is told why — the card keeps its buttons so they can tap again.
+    The CI check is done here, client-side, before any write. It is not redundant with
+    GitHub's 405: that only refuses a red PR when the repo has branch protection with
+    required status checks, and audited 2026-08-21 **no NauroLabs repo has any** — so
+    without this gate a single Telegram tap squash-merges a failing PR into the default
+    branch and GitHub returns 200.
+
+    Anything that is not positively green (failing, pending, no checks, or an unresolvable
+    rollup) refuses the merge and tells the human why. The card keeps its buttons so they
+    can tap again once CI settles.
+
+    The merge is pinned to the exact commit whose checks were read, so a push that lands
+    between the check and the merge produces a 409 rather than silently merging a head
+    nobody verified.
     """
+    checks = await gh.checks_state(repo, num)
+    if checks.state != "passing":
+        # Each case gets its own next step. A gate whose only advice is "tap again"
+        # is a dead end when the PR has no CI at all, and a gate people can't satisfy
+        # is a gate people route around.
+        guidance = {
+            "failing": (
+                "CI is red",
+                "Fix the failure and push; the card stays live. Tap ✅ again once it is green.",
+            ),
+            "pending": (
+                "CI is still running",
+                "Give it a minute, then tap ✅ again.",
+            ),
+            "none": (
+                "this PR has no CI checks at all",
+                "Nothing here can turn green, so I will not merge it unattended. "
+                "Review and merge it on GitHub if you intend to ship it.",
+            ),
+            "unknown": (
+                "I could not read the CI status",
+                "Treating that as not-green on purpose. Check the PR on GitHub.",
+            ),
+        }
+        reason, next_step = guidance.get(
+            checks.state, ("CI is not green", "Check the PR on GitHub.")
+        )
+        await tg.answer_callback(callback_id, f"Not merged — {reason}")
+        await tg.send_message(
+            chat_id,
+            f"🛑 Refused to merge {repo}#{num}: {reason}.\n{checks.detail}\n\n"
+            f"Nothing was approved or merged.\n{next_step}\n\n"
+            f"arfpr:{repo}:{num}",
+            reply_to_message_id=message_id,
+        )
+        return {
+            "ok": True, "action": "merge_refused", "repo": repo, "num": num,
+            "checks": checks.state, "detail": checks.detail,
+        }
+
     try:
         await gh.approve_pr(repo, num)
     except Exception:  # noqa: BLE001 — a review hiccup must not 500 the webhook
         log.exception("approve_pr failed for %s#%s", repo, num)
-    merged, detail = await gh.merge_pr(repo, num)
+    merged, detail = await gh.merge_pr(repo, num, sha=checks.sha)
     if merged:
         await gh.comment(repo, num, "Approved + squash-merged via Telegram. 🚢")
         await tg.answer_callback(callback_id, "Merged 🚢")
@@ -142,7 +192,8 @@ async def _approve_pr(
     await tg.send_message(
         chat_id,
         f"👍 Approved {repo}#{num}, but GitHub won't merge it yet:\n{detail}\n\n"
-        f"Tap ✅ again once CI is green.\n\narfpr:{repo}:{num}",
+        f"Tap ✅ again once CI is green — if new commits landed, the next tap re-checks "
+        f"them.\n\narfpr:{repo}:{num}",
         reply_to_message_id=message_id,
     )
     return {"ok": True, "action": "approved_unmerged", "repo": repo, "num": num, "detail": detail}

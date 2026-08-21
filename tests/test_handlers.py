@@ -1,12 +1,15 @@
 """Handler routing tests (offline; mocked Telegram + GitHub clients)."""
+import json
 import os
 import sys
 import unittest
 from unittest.mock import AsyncMock
 
+import httpx
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "functions"))
 
-from github_ops import GitHub  # noqa: E402
+from github_ops import ChecksState, GitHub  # noqa: E402
 from handlers import _parse_callback, _parse_pr_callback, handle_update  # noqa: E402
 from telegram import Telegram  # noqa: E402
 
@@ -164,6 +167,7 @@ class HandlePrCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.tg = AsyncMock(spec=Telegram)
         self.gh = AsyncMock(spec=GitHub)
         self.gh.merge_pr.return_value = (True, "merged")
+        self.gh.checks_state.return_value = ChecksState("passing", "SUCCESS", "c0ffee")
 
     def _pr_update(self, data, chat_id=42, message_id=7):
         return {
@@ -182,12 +186,20 @@ class HandlePrCallbackTests(unittest.IsolatedAsyncioTestCase):
         result = await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
         self.assertEqual(result["action"], "merged")
         self.gh.approve_pr.assert_awaited_once_with("era", 12)
-        self.gh.merge_pr.assert_awaited_once_with("era", 12)
+        # Pinned to the commit whose checks were read, not to "whatever the head is now".
+        self.gh.merge_pr.assert_awaited_once_with("era", 12, sha="c0ffee")
         self.gh.comment.assert_awaited_once()
         self.tg.edit_reply_markup.assert_awaited_once()
         # A PR tap must never touch the idea-issue lifecycle.
         self.gh.close_issue.assert_not_awaited()
         self.gh.assign_copilot.assert_not_awaited()
+
+    async def test_merge_is_pinned_to_the_verified_commit(self):
+        # The requirement: whatever commit was judged is the commit that gets merged.
+        # If these ever drift apart the bot merges code it never checked.
+        self.gh.checks_state.return_value = ChecksState("passing", "SUCCESS", "abc123")
+        await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
+        self.assertEqual(self.gh.merge_pr.await_args.kwargs["sha"], "abc123")
 
     async def test_approve_reports_when_not_mergeable(self):
         self.gh.merge_pr.return_value = (False, "405: Base branch was modified")
@@ -211,6 +223,98 @@ class HandlePrCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.gh.approve_pr.assert_not_awaited()
         self.gh.merge_pr.assert_not_awaited()
+
+    # ── CI gate ──────────────────────────────────────────────────────────────
+    # These assert the *requirement* (a PR that is not green is never merged), so they
+    # fail if the gate is removed — not merely if the code is reshaped. Without the gate
+    # every one of these cases merges, because no NauroLabs repo requires status checks
+    # and GitHub therefore returns 200 rather than the 405 the old path relied on.
+
+    async def test_red_ci_is_never_merged_or_approved(self):
+        self.gh.checks_state.return_value = ChecksState("failing", "FAILURE", "c0ffee")
+        result = await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
+        self.assertEqual(result["action"], "merge_refused")
+        self.gh.merge_pr.assert_not_awaited()
+        self.gh.approve_pr.assert_not_awaited()
+        self.gh.comment.assert_not_awaited()
+        self.tg.send_message.assert_awaited_once()
+        self.tg.edit_reply_markup.assert_not_awaited()  # keep buttons for a retry
+
+    async def test_pending_ci_is_not_merged(self):
+        self.gh.checks_state.return_value = ChecksState("pending", "PENDING", "c0ffee")
+        result = await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
+        self.assertEqual(result["action"], "merge_refused")
+        self.gh.merge_pr.assert_not_awaited()
+
+    async def test_pr_without_checks_is_not_merged(self):
+        # A repo with no CI must not read as green — that is the silent-failure case.
+        self.gh.checks_state.return_value = ChecksState("none", "no checks configured", "c0ffee")
+        result = await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
+        self.assertEqual(result["action"], "merge_refused")
+        self.gh.merge_pr.assert_not_awaited()
+
+    async def test_unreadable_ci_fails_closed(self):
+        self.gh.checks_state.return_value = ChecksState("unknown", "network error")
+        result = await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
+        self.assertEqual(result["action"], "merge_refused")
+        self.gh.merge_pr.assert_not_awaited()
+
+
+class PrMergeWireTests(unittest.IsolatedAsyncioTestCase):
+    """End-to-end over the wire: a real GitHub client, only the HTTP layer faked.
+
+    The tests above mock `checks_state` wholesale, so they prove the *handler* honours a
+    verdict — not that a red PR produces one. These drive the real `checks_state` from a
+    real GraphQL body and assert that no merge request is ever *issued*. That is the
+    requirement stated at the only layer where it cannot be faked: the network.
+    """
+
+    def _update(self):
+        return {"callback_query": {
+            "id": "cb1", "data": "arfpr:era:12",
+            "message": {"message_id": 7, "chat": {"id": 42}, "text": "PR\narfpr:era:12"},
+        }}
+
+    async def _tap_approve(self, rollup_state):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            if request.url.path == "/graphql":
+                return httpx.Response(200, json={"data": {"repository": {"pullRequest": {
+                    "commits": {"nodes": [{"commit": {
+                        "oid": "c0ffee",
+                        "statusCheckRollup": (
+                            None if rollup_state is None else {"state": rollup_state}
+                        ),
+                    }}]}}}}})
+            return httpx.Response(200, json={"merged": True, "id": 1})
+
+        update = self._update()
+        update["callback_query"]["data"] = "arfpr:era:12:y"
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gh = GitHub("tok", "samoletovs", client)
+            tg = AsyncMock(spec=Telegram)
+            result = await handle_update(update, tg, gh, "42")
+        return result, requests
+
+    async def test_red_rollup_issues_no_merge_request(self):
+        result, requests = await self._tap_approve("FAILURE")
+        self.assertEqual(result["action"], "merge_refused")
+        self.assertEqual([r for r in requests if r.method == "PUT"], [])
+        self.assertEqual([r for r in requests if "/reviews" in r.url.path], [])
+
+    async def test_missing_rollup_issues_no_merge_request(self):
+        result, requests = await self._tap_approve(None)
+        self.assertEqual(result["action"], "merge_refused")
+        self.assertEqual([r for r in requests if r.method == "PUT"], [])
+
+    async def test_green_rollup_merges_pinned_to_the_checked_commit(self):
+        result, requests = await self._tap_approve("SUCCESS")
+        self.assertEqual(result["action"], "merged")
+        merges = [r for r in requests if r.method == "PUT"]
+        self.assertEqual(len(merges), 1)
+        self.assertEqual(json.loads(merges[0].content)["sha"], "c0ffee")
 
 
 if __name__ == "__main__":
