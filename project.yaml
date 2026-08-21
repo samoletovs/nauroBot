@@ -1,6 +1,6 @@
 name: nauroBot
 purpose: "Interactive NauroLabs ops bot — approve/decline autoRefine idea proposals from Telegram; a 👍 moves the issue into the Copilot build loop, a 👎 closes it and feeds the reason back to the idea generator"
-users: "Personal — Sam, running the NauroLabs lab"
+users: "The nauroLabs repository owner"
 stage: scaffold
 goals:
   - "Receive Telegram taps/replies via an always-on webhook Function"
@@ -9,7 +9,7 @@ goals:
   - "Extensible bot backend — future scenarios (approve deploys, status, trigger a plan) are new handlers"
 similar:
   - "homeScout family feedback loop (👍/👎 cards → learned taste)"
-  - "mindVault Copilot Dispatch (issue → coding agent → PR reaper)"
+  - "Existing issue-to-coding-agent dispatch workflow"
 quality:
   - tests
 origin: "nauroLabs self-evolution Phase 6 — the idea feedback loop (see .github/EVOLUTION.md)"

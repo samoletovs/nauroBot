@@ -27,5 +27,12 @@ infrastructure/*.json
 *.log
 .playwright-mcp/
 
+# IDE / OS / build output
+.vscode/
+.idea/
+Thumbs.db
+build/
+dist/
+
 # Local-only personal-info pattern overrides
 scripts/.leak-patterns.local.txt

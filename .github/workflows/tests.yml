@@ -7,8 +7,8 @@ name: Tests
 # reported the assurance of having tests while providing none of it.
 #
 # No cron, so this adds nothing to the schedule ceiling in
-# nauroLabs-github/config/schedule-budget.json. Path-filtered because this repo
-# is private and its minutes come out of the monthly allowance.
+# nauroLabs-github/config/schedule-budget.json. Path-filtered to avoid unnecessary
+# workflow runs.
 
 on:
   push:

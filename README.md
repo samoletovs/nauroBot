@@ -1,9 +1,20 @@
 # nauroBot
 
-The interactive backend for the **NauroLabs ops bot** — an always-on Azure Functions
-webhook that turns Telegram taps into lab action.
+nauroBot is the interactive backend for the nauroLabs operations bot. It is an
+Azure Functions webhook that turns an authorized Telegram action into a GitHub
+issue update.
 
-Its first job is the **idea feedback loop**. [autoRefine](../autoRefine) scans a project
+## Research question
+
+nauroBot tests the nauroLabs question **"Can a company run itself?"** It explores
+whether a phone-sized human approval surface is enough to supervise an automated
+idea and build loop without giving the automation authority to approve its own
+work.
+
+## What it does
+
+Its first job is the **idea feedback loop**.
+[autoRefine](https://github.com/samoletovs/autoRefine) scans a project
 against its north-star fitness, proposes a functional idea, files it as a GitHub issue, and
 sends a Telegram card:
 
@@ -27,7 +38,7 @@ No database — the **GitHub issue is the shared state**. nauroBot (always-on) a
 autoRefine (CI)                 nauroBot (Function)              GitHub
 ──────────────                  ───────────────────              ──────
 propose idea ──▶ file issue ──▶                          ──▶ issue: needs-approval
-send Telegram card ──────────▶  (Sam taps 👍 / 👎)
+send Telegram card ──────────▶  (owner taps 👍 / 👎)
                                 POST /api/telegram
                                 ├─ 👍 relabel + assign Copilot ─▶ issue: approved + agent
                                 └─ 👎 close + label ────────────▶ issue: declined (+ reason)
@@ -37,7 +48,17 @@ next run: read declined reasons ◀───────────────
 ## Stack
 
 Python 3.11 · Azure Functions (v2, Y1 Consumption) · httpx · Telegram Bot API · GitHub
-REST + GraphQL. Managed by Bicep on the NauroLabs golden path (shared monitoring module).
+REST + GraphQL. Managed by Bicep on the nauroLabs golden path (shared monitoring module).
+
+## Run locally
+
+```pwsh
+cd nauroBot
+python -m pip install -r functions/requirements.txt
+python -m unittest discover tests
+```
+
+All tests are offline and mock Telegram and GitHub.
 
 ## Configure
 
@@ -51,13 +72,6 @@ All config is Function App settings (see [.env.example](.env.example)):
 | `NAURO_CHAT_ID` | The only chat allowed to drive the bot |
 | `NAURO_GITHUB_OWNER` | `samoletovs` |
 
-## Develop
-
-```pwsh
-cd nauroBot
-python -m unittest discover tests    # offline; no network, no Azure
-```
-
 ## Deploy
 
 ```pwsh
@@ -70,5 +84,12 @@ webhook is live, tapping a card drives the loop end-to-end.
 
 ---
 
-Part of [NauroLabs](https://naurolabs.com) · self-evolution Phase 6 (see
-`.github/EVOLUTION.md`).
+## Status
+
+**Scaffold.** The Telegram webhook, approval/decline handlers, GitHub operations,
+and offline tests are implemented. Deployment still requires repository and
+Function App secrets plus Telegram webhook registration.
+
+## License
+
+MIT
