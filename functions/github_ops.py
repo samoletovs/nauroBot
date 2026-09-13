@@ -289,12 +289,15 @@ class GitHub:
             headers=self._headers,
             json=body,
         )
-        if resp.status_code == 200:
-            return True, "merged"
         try:
-            detail = resp.json().get("message", resp.text)
-        except (ValueError, KeyError):
-            detail = resp.text
+            receipt = resp.json()
+        except ValueError:
+            receipt = None
+        if resp.status_code == 200:
+            if isinstance(receipt, dict) and receipt.get("merged") is True:
+                return True, "merged"
+            return False, "200: merge not confirmed by GitHub's response"
+        detail = receipt.get("message", resp.text) if isinstance(receipt, dict) else resp.text
         return False, f"{resp.status_code}: {detail}"
 
     async def close_pr(self, repo: str, num: int) -> None:
