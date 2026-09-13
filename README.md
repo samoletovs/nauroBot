@@ -60,6 +60,11 @@ python -m unittest discover tests
 
 All tests are offline and mock Telegram and GitHub.
 
+PR approval and merge receipts are tracked separately. If both operations fail, the bot
+does not claim approval. A confirmed merge can still be reported when the approval-review
+request failed, but its audit comment names that distinction. HTTP 200 alone is not a
+merge receipt: GitHub must return `merged: true`.
+
 ## Configure
 
 All config is Function App settings (see [.env.example](.env.example)):

@@ -209,6 +209,46 @@ class HandlePrCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.tg.send_message.assert_awaited_once()  # tells the human why it won't merge
         self.tg.edit_reply_markup.assert_not_awaited()  # keep the buttons for a retry
 
+    async def test_failed_approval_and_merge_do_not_claim_approval(self) -> None:
+        request = httpx.Request("POST", "https://api.github.test/reviews")
+        self.gh.approve_pr.side_effect = httpx.HTTPStatusError(
+            "Approval refused", request=request,
+            response=httpx.Response(403, request=request),
+        )
+        self.gh.merge_pr.return_value = (False, "405: Required approval missing")
+
+        result = await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
+
+        self.assertEqual("approval_failed", result["action"])
+        self.assertFalse(result["approval_recorded"])
+        self.assertIn("Not approved or merged", self.tg.answer_callback.await_args.args[1])
+        message = self.tg.send_message.await_args.args[1]
+        self.assertIn("could not record approval", message)
+        self.assertNotIn("Approved era#12", message)
+        self.gh.comment.assert_not_awaited()
+        self.tg.edit_reply_markup.assert_not_awaited()
+
+    async def test_confirmed_merge_after_failed_approval_reports_only_what_succeeded(self) -> None:
+        self.gh.approve_pr.side_effect = httpx.ConnectError("Review endpoint unavailable")
+
+        result = await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
+
+        self.assertEqual("merged", result["action"])
+        self.assertFalse(result["approval_recorded"])
+        self.assertNotIn("Approved +", self.gh.comment.await_args.args[2])
+        self.assertIn("could not be recorded", self.gh.comment.await_args.args[2])
+        self.tg.answer_callback.assert_awaited_once_with("cb1", "Merged 🚢")
+        self.tg.edit_reply_markup.assert_awaited_once()
+
+    async def test_unexpected_approval_error_does_not_continue_to_merge(self) -> None:
+        self.gh.approve_pr.side_effect = RuntimeError("Unexpected application defect")
+
+        with self.assertRaisesRegex(RuntimeError, "Unexpected application defect"):
+            await handle_update(self._pr_update("arfpr:era:12:y"), self.tg, self.gh, "42")
+
+        self.gh.merge_pr.assert_not_awaited()
+        self.tg.answer_callback.assert_not_awaited()
+
     async def test_decline_closes_pr(self):
         result = await handle_update(self._pr_update("arfpr:era:12:n"), self.tg, self.gh, "42")
         self.assertEqual(result["action"], "pr_closed")

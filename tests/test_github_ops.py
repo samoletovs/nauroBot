@@ -127,6 +127,19 @@ class PrOpsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen["method"], "PUT")
         self.assertEqual(seen["body"]["merge_method"], "squash")
 
+    async def test_merge_pr_requires_a_positive_receipt_not_just_http_200(self) -> None:
+        for receipt in ({"merged": False}, {"merged": "true"}, {}, [], None):
+            with self.subTest(receipt=receipt):
+                def handler(request: httpx.Request) -> httpx.Response:
+                    return httpx.Response(200, json=receipt)
+
+                async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                    gh = GitHub("fake", "owner", client)
+                    merged, detail = await gh.merge_pr("demo", 1, sha="verified")
+
+                self.assertFalse(merged)
+                self.assertIn("not confirmed", detail)
+
     async def test_merge_pr_reports_405(self):
         def handler(request):
             return httpx.Response(405, json={"message": "Pull Request is not mergeable"})

@@ -20,6 +20,8 @@ import logging
 import re
 from typing import Any, Optional
 
+import httpx
+
 from config import LABEL_APPROVED, LABEL_DECLINED, LABEL_NEEDS_APPROVAL, LABEL_PARKED
 from github_ops import GitHub
 from telegram import Telegram
@@ -177,17 +179,41 @@ async def _approve_pr(
             "checks": checks.state, "detail": checks.detail,
         }
 
+    approval_recorded = False
     try:
         await gh.approve_pr(repo, num)
-    except Exception:  # noqa: BLE001 — a review hiccup must not 500 the webhook
+        approval_recorded = True
+    except httpx.HTTPError:
         log.exception("approve_pr failed for %s#%s", repo, num)
     merged, detail = await gh.merge_pr(repo, num, sha=checks.sha)
     if merged:
-        await gh.comment(repo, num, "Approved + squash-merged via Telegram. 🚢")
+        note = (
+            "Approved + squash-merged via Telegram. 🚢"
+            if approval_recorded else
+            "Squash-merged via Telegram. Approval review could not be recorded."
+        )
+        await gh.comment(repo, num, note)
         await tg.answer_callback(callback_id, "Merged 🚢")
         if message_id is not None:
             await tg.edit_reply_markup(chat_id, message_id, None)
-        return {"ok": True, "action": "merged", "repo": repo, "num": num}
+        return {
+            "ok": True, "action": "merged", "repo": repo, "num": num,
+            "approval_recorded": approval_recorded,
+        }
+    if not approval_recorded:
+        await tg.answer_callback(callback_id, "Not approved or merged")
+        await tg.send_message(
+            chat_id,
+            f"I could not record approval for {repo}#{num}, and the PR was not merged.\n"
+            f"GitHub merge result: {detail}\n\n"
+            f"Check review permissions and the PR on GitHub before retrying. "
+            f"The next tap re-checks the current commit.\n\narfpr:{repo}:{num}",
+            reply_to_message_id=message_id,
+        )
+        return {
+            "ok": True, "action": "approval_failed", "repo": repo, "num": num,
+            "approval_recorded": False, "detail": detail,
+        }
     await tg.answer_callback(callback_id, "Approved — not mergeable yet")
     await tg.send_message(
         chat_id,
@@ -196,7 +222,10 @@ async def _approve_pr(
         f"them.\n\narfpr:{repo}:{num}",
         reply_to_message_id=message_id,
     )
-    return {"ok": True, "action": "approved_unmerged", "repo": repo, "num": num, "detail": detail}
+    return {
+        "ok": True, "action": "approved_unmerged", "repo": repo, "num": num,
+        "approval_recorded": True, "detail": detail,
+    }
 
 
 async def _decline_pr(
