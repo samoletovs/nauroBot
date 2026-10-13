@@ -144,16 +144,15 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PrOpsTests(unittest.IsolatedAsyncioTestCase):
-    async def test_merge_transport_failure_is_reported_and_logged(self):
+    async def test_merge_transport_failure_is_logged_and_typed(self):
         def handler(request):
             raise httpx.ReadTimeout("private response", request=request)
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             with self.assertLogs("naurobot.github", level="ERROR"):
-                merged, detail = await GitHub("tok", "samoletovs", client).merge_pr("era", 12)
-        self.assertFalse(merged)
-        self.assertIn("ReadTimeout", detail)
-        self.assertNotIn("private response", detail)
+                with self.assertRaisesRegex(GitHubError, "ReadTimeout") as caught:
+                    await GitHub("tok", "samoletovs", client).merge_pr("era", 12)
+        self.assertNotIn("private response", str(caught.exception))
 
     async def test_approve_pr_posts_approve_review(self):
         seen = {}

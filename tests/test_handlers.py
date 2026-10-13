@@ -358,6 +358,25 @@ class PrMergeWireTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GitHubFailureWireTests(unittest.IsolatedAsyncioTestCase):
+    async def test_merge_timeout_does_not_claim_the_pr_was_not_merged(self):
+        def handler(request):
+            if request.method == "PUT":
+                raise httpx.ReadTimeout("private response", request=request)
+            return httpx.Response(200, json={})
+
+        tg = AsyncMock(spec=Telegram)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gh = GitHub("tok", "samoletovs", client)
+            gh.checks_state = AsyncMock(return_value=ChecksState("passing", "SUCCESS", "c0ffee"))
+            with self.assertLogs("naurobot.github", level="ERROR"):
+                result = await handle_update(_callback_update("arfpr:era:12:y"), tg, gh, "42")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "github_api")
+        self.assertNotIn("action", result)
+        tg.send_message.assert_not_awaited()
+        tg.edit_reply_markup.assert_not_awaited()
+        self.assertIn("check GitHub", tg.answer_callback.await_args.args[1])
+
     async def test_assignment_failure_stops_after_relabelling_without_claiming_success(self):
         requests = []
 

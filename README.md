@@ -69,7 +69,9 @@ GitHub request failures are logged without request bodies or credentials. The up
 handler returns `ok: false`, `error: github_api`, and a safe error detail instead of
 letting API exceptions escape. Failed callbacks keep their controls and tell the user
 to check GitHub before retrying: earlier steps may already have succeeded. CI lookup
-failures still refuse merging, and merge failures return an unsuccessful receipt.
+failures still refuse merging, and merge rejections return an unsuccessful receipt.
+Merge transport failures use the error result instead: a timeout cannot prove whether
+GitHub completed the merge, so the bot does not claim it remained unmerged.
 
 ## Configure
 

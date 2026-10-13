@@ -312,13 +312,10 @@ class GitHub:
         body: dict[str, Any] = {"merge_method": method}
         if sha:
             body["sha"] = sha
-        try:
-            resp = await self._request(
-                "PUT", f"{_REST}/repos/{self._owner}/{repo}/pulls/{num}/merge",
-                check_status=False, json=body,
-            )
-        except GitHubError as exc:
-            return False, str(exc)
+        resp = await self._request(
+            "PUT", f"{_REST}/repos/{self._owner}/{repo}/pulls/{num}/merge",
+            check_status=False, json=body,
+        )
         try:
             receipt = resp.json()
         except ValueError:
