@@ -65,6 +65,12 @@ does not claim approval. A confirmed merge can still be reported when the approv
 request failed, but its audit comment names that distinction. HTTP 200 alone is not a
 merge receipt: GitHub must return `merged: true`.
 
+GitHub request failures are logged without request bodies or credentials. The update
+handler returns `ok: false`, `error: github_api`, and a safe error detail instead of
+letting API exceptions escape. Failed callbacks keep their controls and tell the user
+to check GitHub before retrying: earlier steps may already have succeeded. CI lookup
+failures still refuse merging, and merge failures return an unsuccessful receipt.
+
 ## Configure
 
 All config is Function App settings (see [.env.example](.env.example)):

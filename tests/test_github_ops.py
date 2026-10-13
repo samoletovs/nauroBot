@@ -8,7 +8,7 @@ import httpx
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "functions"))
 
-from github_ops import GitHub  # noqa: E402
+from github_ops import GitHub, GitHubError  # noqa: E402
 
 
 class AssignCopilotTests(unittest.IsolatedAsyncioTestCase):
@@ -42,6 +42,50 @@ class AssignCopilotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_api_failures_are_logged_with_safe_context(self):
+        operations = [
+            ("add_labels", (["approved"],)),
+            ("remove_label", ("needs-approval",)),
+            ("comment", ("feedback",)),
+            ("close_issue", ()),
+            ("approve_pr", ()),
+            ("close_pr", ()),
+            ("assign_copilot", ()),
+        ]
+        for operation, args in operations:
+            for failure in (401, 403, 429, 500, "timeout", "connection"):
+                with self.subTest(operation=operation, failure=failure):
+                    def handler(request):
+                        if failure == "timeout":
+                            raise httpx.ReadTimeout("private response", request=request)
+                        if failure == "connection":
+                            raise httpx.ConnectError("private response", request=request)
+                        return httpx.Response(failure, text="private response")
+
+                    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                        gh = GitHub("tok", "samoletovs", client)
+                        with self.assertLogs("naurobot.github", level="ERROR") as logs:
+                            with self.assertRaises(httpx.HTTPError) as caught:
+                                await getattr(gh, operation)("era", 12, *args)
+                    self.assertIn("GitHub", str(caught.exception))
+                    self.assertNotIn("private response", str(caught.exception))
+                    self.assertNotIn("private response", "\n".join(logs.output))
+
+    async def test_assignment_bad_responses_are_logged_api_errors(self):
+        for response in (
+            httpx.Response(200, text="not JSON"),
+            httpx.Response(200, json=[]),
+            httpx.Response(200, json={"data": None}),
+            httpx.Response(200, json={"data": {"repository": None}}),
+        ):
+            with self.subTest(response=response):
+                async with httpx.AsyncClient(
+                    transport=httpx.MockTransport(lambda request: response)
+                ) as client:
+                    with self.assertLogs("naurobot.github", level="ERROR"):
+                        with self.assertRaises(httpx.HTTPError):
+                            await GitHub("tok", "samoletovs", client).assign_copilot("era", 12)
+
     async def test_remove_label_tolerates_404(self):
         def handler(request):
             return httpx.Response(404, json={"message": "Label does not exist"})
@@ -89,16 +133,28 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
             await gh.close_issue("era", 12)
         self.assertEqual(seen["body"], {"state": "closed", "state_reason": "not_planned"})
 
-    async def test_graphql_raises_on_errors(self):
+    async def test_graphql_errors_are_logged_and_typed(self):
         def handler(request):
             return httpx.Response(200, json={"errors": [{"message": "bad"}]})
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             gh = GitHub("tok", "samoletovs", client)
-            with self.assertRaises(RuntimeError):
-                await gh.assign_copilot("era", 12)
+            with self.assertLogs("naurobot.github", level="ERROR"):
+                with self.assertRaisesRegex(GitHubError, "GraphQL returned errors"):
+                    await gh.assign_copilot("era", 12)
 
 
 class PrOpsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_merge_transport_failure_is_reported_and_logged(self):
+        def handler(request):
+            raise httpx.ReadTimeout("private response", request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with self.assertLogs("naurobot.github", level="ERROR"):
+                merged, detail = await GitHub("tok", "samoletovs", client).merge_pr("era", 12)
+        self.assertFalse(merged)
+        self.assertIn("ReadTimeout", detail)
+        self.assertNotIn("private response", detail)
+
     async def test_approve_pr_posts_approve_review(self):
         seen = {}
 

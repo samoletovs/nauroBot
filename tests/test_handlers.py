@@ -357,5 +357,79 @@ class PrMergeWireTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(merges[0].content)["sha"], "c0ffee")
 
 
+class GitHubFailureWireTests(unittest.IsolatedAsyncioTestCase):
+    async def test_assignment_failure_stops_after_relabelling_without_claiming_success(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            if request.url.path == "/graphql":
+                return httpx.Response(200, json={"errors": [{"message": "private response"}]})
+            return httpx.Response(200, json={})
+
+        tg = AsyncMock(spec=Telegram)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with self.assertLogs("naurobot.github", level="ERROR"):
+                result = await handle_update(
+                    _callback_update("arf:era:12:y"),
+                    tg, GitHub("tok", "samoletovs", client), "42",
+                )
+        self.assertFalse(result["ok"])
+        self.assertIn("GraphQL returned errors", result["detail"])
+        self.assertFalse(any(r.url.path.endswith("/comments") for r in requests))
+        tg.edit_reply_markup.assert_not_awaited()
+        self.assertIn("check GitHub", tg.answer_callback.await_args.args[1])
+
+    async def test_reply_timeout_returns_safe_error(self):
+        def handler(request):
+            raise httpx.ReadTimeout("private response", request=request)
+
+        update = {"message": {
+            "chat": {"id": 42}, "text": "reason",
+            "reply_to_message": {"text": "arf:era:12"},
+        }}
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with self.assertLogs("naurobot.github", level="ERROR"):
+                result = await handle_update(
+                    update, AsyncMock(spec=Telegram), GitHub("tok", "samoletovs", client), "42",
+                )
+        self.assertFalse(result["ok"])
+        self.assertIn("ReadTimeout", result["detail"])
+        self.assertNotIn("private response", result["detail"])
+
+    async def test_failed_actions_return_errors_and_keep_controls(self):
+        updates = [
+            _callback_update(data)
+            for data in (
+                "arf:era:12:y", "arf:era:12:p", "arf:era:12:n", "arfpr:era:12:n",
+            )
+        ]
+        updates.append({"message": {
+            "chat": {"id": 42}, "text": "reason",
+            "reply_to_message": {"text": "arf:era:12"},
+        }})
+        for update in updates:
+            with self.subTest(update=update):
+                requests = []
+
+                def handler(request):
+                    requests.append(request)
+                    return httpx.Response(503, text="private response")
+
+                tg = AsyncMock(spec=Telegram)
+                async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                    with self.assertLogs("naurobot.github", level="ERROR"):
+                        result = await handle_update(
+                            update, tg, GitHub("tok", "samoletovs", client), "42"
+                        )
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"], "github_api")
+                self.assertIn("503", result["detail"])
+                self.assertEqual(len(requests), 1)
+                tg.edit_reply_markup.assert_not_awaited()
+                if "callback_query" in update:
+                    self.assertIn("GitHub", tg.answer_callback.await_args.args[1])
+
+
 if __name__ == "__main__":
     unittest.main()

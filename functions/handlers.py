@@ -23,7 +23,7 @@ from typing import Any, Optional
 import httpx
 
 from config import LABEL_APPROVED, LABEL_DECLINED, LABEL_NEEDS_APPROVAL, LABEL_PARKED
-from github_ops import GitHub
+from github_ops import GitHub, GitHubError
 from telegram import Telegram
 
 log = logging.getLogger("naurobot.handlers")
@@ -291,9 +291,18 @@ async def handle_update(
     update: dict[str, Any], tg: Telegram, gh: GitHub, allowed_chat: str = ""
 ) -> dict[str, Any]:
     """Route one Telegram update to the idea feedback handlers."""
-    if "callback_query" in update:
-        return await _handle_callback(update["callback_query"], tg, gh, allowed_chat)
-    message = update.get("message") or {}
-    if message.get("reply_to_message"):
-        return await _handle_reply(message, tg, gh, allowed_chat)
-    return {"ok": True, "action": "ignored"}
+    try:
+        if "callback_query" in update:
+            return await _handle_callback(update["callback_query"], tg, gh, allowed_chat)
+        message = update.get("message") or {}
+        if message.get("reply_to_message"):
+            return await _handle_reply(message, tg, gh, allowed_chat)
+        return {"ok": True, "action": "ignored"}
+    except GitHubError as exc:
+        callback = update.get("callback_query")
+        if callback:
+            await tg.answer_callback(
+                callback.get("id", ""),
+                "GitHub request failed — check GitHub before retrying.",
+            )
+        return {"ok": False, "error": "github_api", "detail": str(exc)}
