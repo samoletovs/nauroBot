@@ -24,8 +24,18 @@ param allowedChatId string = ''
 @description('GitHub owner for NauroLabs project repos')
 param githubOwner string = 'samoletovs'
 
-@description('Salt appended to plan/app names to force a fresh instance when recovering from a wedged one')
-param instanceId string = ''
+@description('Salt appended to the app name to force a fresh instance when recovering from a wedged one. The live app is naurobot-func-<suffix>b.')
+param instanceId string = 'b'
+
+// The Flex plan and package container were auto-named when the app moved off Linux
+// Consumption (2026-10). A Flex app cannot change plans, so these must match the live names.
+// A Flex plan hosts exactly one app: a recovery with a new instanceId must also pass a
+// fresh functionPlanName and deploymentContainerName.
+@description('Flex Consumption plan name')
+param functionPlanName string = 'ASP-naurobotrg-302e'
+
+@description('Blob container holding the Flex deployment package')
+param deploymentContainerName string = 'app-package-naurobotfunctu72uwipcdj2sb-9005431'
 
 var suffix = uniqueString(resourceGroup().id)
 var tags = {
@@ -59,35 +69,61 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   }
 }
 
-// ── Function App (Linux Consumption, Python 3.11). Stateless webhook, so the plan's
-//    ephemeral disk is fine. ──
-resource plan 'Microsoft.Web/serverfarms@2023-12-01' = {
-  name: '${projectName}-plan-${suffix}${instanceId}'
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+  parent: storage
+  name: 'default'
+}
+
+resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: deploymentContainerName
+  properties: { publicAccess: 'None' }
+}
+
+var storageConnection = 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storage.listKeys().keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
+
+
+// ── Function App (Flex Consumption, Python 3.11). Stateless webhook, so the
+//    instance's ephemeral disk is fine. ──
+resource plan 'Microsoft.Web/serverfarms@2024-04-01' = {
+  name: functionPlanName
   location: location
   tags: tags
-  sku: { name: 'Y1', tier: 'Dynamic' }
+  sku: { name: 'FC1', tier: 'FlexConsumption' }
   kind: 'functionapp'
   properties: { reserved: true }
 }
 
-resource func 'Microsoft.Web/sites@2023-12-01' = {
+resource func 'Microsoft.Web/sites@2024-04-01' = {
   name: '${projectName}-func-${suffix}${instanceId}'
   location: location
   tags: tags
   kind: 'functionapp,linux'
   identity: { type: 'SystemAssigned' }
+  dependsOn: [ deploymentContainer ]
   properties: {
     serverFarmId: plan.id
-    reserved: true
     httpsOnly: true
+    functionAppConfig: {
+      deployment: {
+        storage: {
+          type: 'blobContainer'
+          value: '${storage.properties.primaryEndpoints.blob}${deploymentContainerName}'
+          authentication: {
+            type: 'StorageAccountConnectionString'
+            storageAccountConnectionStringName: 'DEPLOYMENT_STORAGE_CONNECTION_STRING'
+          }
+        }
+      }
+      scaleAndConcurrency: { maximumInstanceCount: 10, instanceMemoryMB: 2048 }
+      runtime: { name: 'python', version: '3.11' }
+    }
     siteConfig: {
-      linuxFxVersion: 'Python|3.11'
       ftpsState: 'Disabled'
       minTlsVersion: '1.2'
       appSettings: [
-        { name: 'AzureWebJobsStorage', value: 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storage.listKeys().keys[0].value};EndpointSuffix=${environment().suffixes.storage}' }
-        { name: 'FUNCTIONS_EXTENSION_VERSION', value: '~4' }
-        { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'python' }
+        { name: 'AzureWebJobsStorage', value: storageConnection }
+        { name: 'DEPLOYMENT_STORAGE_CONNECTION_STRING', value: storageConnection }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: monitoring.outputs.connectionString }
         { name: 'NAURO_BOT_TOKEN', value: botToken }
         { name: 'TELEGRAM_WEBHOOK_SECRET', value: webhookSecret }

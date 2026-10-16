@@ -47,7 +47,7 @@ next run: read declined reasons ◀───────────────
 
 ## Stack
 
-Python 3.11 · Azure Functions (v2, Y1 Consumption) · httpx · Telegram Bot API · GitHub
+Python 3.11 · Azure Functions (v2, Flex Consumption) · httpx · Telegram Bot API · GitHub
 REST + GraphQL. Managed by Bicep on the nauroLabs golden path (shared monitoring module).
 
 ## Run locally
