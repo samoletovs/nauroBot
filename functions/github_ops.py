@@ -75,6 +75,10 @@ class ChecksState(NamedTuple):
     sha: str = ""
 
 
+class GitHubError(httpx.HTTPError):
+    """A logged GitHub API failure with a safe, caller-facing message."""
+
+
 class GitHub:
     """Issue operations against ``{owner}/{repo}`` using a user PAT + shared HTTP client."""
 
@@ -87,62 +91,83 @@ class GitHub:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
+    def _error(self, detail: str) -> GitHubError:
+        message = f"GitHub API failed: {detail}"
+        log.error("%s", message)
+        return GitHubError(message)
+
+    async def _request(
+        self, method: str, url: str, *, accepted: tuple[int, ...] = (),
+        check_status: bool = True, **kwargs: Any,
+    ) -> httpx.Response:
+        try:
+            resp = await self._client.request(method, url, headers=self._headers, **kwargs)
+            if check_status and resp.status_code not in accepted:
+                resp.raise_for_status()
+            return resp
+        except httpx.HTTPError as exc:
+            detail = (
+                f"HTTP {exc.response.status_code}"
+                if isinstance(exc, httpx.HTTPStatusError) else type(exc).__name__
+            )
+            raise self._error(f"{method} {httpx.URL(url).path} ({detail})") from None
+
     async def add_labels(self, repo: str, num: int, labels: list[str]) -> None:
         # `approved` / `declined` won't pre-exist in a project repo, and the add-labels
         # endpoint rejects unknown labels — so ensure each exists first (idempotent).
         for label in labels:
             await self._ensure_label(repo, label)
-        resp = await self._client.post(
+        await self._request(
+            "POST",
             f"{_REST}/repos/{self._owner}/{repo}/issues/{num}/labels",
-            headers=self._headers,
             json={"labels": labels},
         )
-        resp.raise_for_status()
 
     async def _ensure_label(self, repo: str, name: str) -> None:
         """Create a repo label if missing. Idempotent — tolerates 'already exists' (422)."""
-        resp = await self._client.post(
+        await self._request(
+            "POST",
             f"{_REST}/repos/{self._owner}/{repo}/labels",
-            headers=self._headers,
+            accepted=(201, 422),
             json={"name": name, "color": "ededed"},
         )
-        # 201 = created; 422 = already exists — both are fine.
-        if resp.status_code not in (201, 422):
-            resp.raise_for_status()
 
     async def remove_label(self, repo: str, num: int, label: str) -> None:
-        resp = await self._client.delete(
-            f"{_REST}/repos/{self._owner}/{repo}/issues/{num}/labels/{label}",
-            headers=self._headers,
-        )
         # 404 = the label wasn't on the issue; that's a no-op, not an error.
-        if resp.status_code not in (200, 404):
-            resp.raise_for_status()
+        await self._request(
+            "DELETE",
+            f"{_REST}/repos/{self._owner}/{repo}/issues/{num}/labels/{label}",
+            accepted=(200, 404),
+        )
 
     async def comment(self, repo: str, num: int, body: str) -> None:
-        resp = await self._client.post(
+        await self._request(
+            "POST",
             f"{_REST}/repos/{self._owner}/{repo}/issues/{num}/comments",
-            headers=self._headers,
             json={"body": body},
         )
-        resp.raise_for_status()
 
     async def close_issue(self, repo: str, num: int, state_reason: str = "not_planned") -> None:
-        resp = await self._client.patch(
+        await self._request(
+            "PATCH",
             f"{_REST}/repos/{self._owner}/{repo}/issues/{num}",
-            headers=self._headers,
             json={"state": "closed", "state_reason": state_reason},
         )
-        resp.raise_for_status()
 
     async def _graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
-        resp = await self._client.post(
-            _GRAPHQL, headers=self._headers, json={"query": query, "variables": variables}
+        resp = await self._request(
+            "POST", _GRAPHQL, json={"query": query, "variables": variables}
         )
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            raise self._error("GraphQL returned invalid JSON") from None
+        if not isinstance(data, dict):
+            raise self._error("GraphQL returned an unexpected response")
         if data.get("errors"):
-            raise RuntimeError(f"GraphQL error: {data['errors']}")
+            raise self._error("GraphQL returned errors")
+        if not isinstance(data.get("data"), dict):
+            raise self._error("GraphQL returned no data")
         return data["data"]
 
     async def assign_copilot(self, repo: str, num: int) -> bool:
@@ -154,15 +179,21 @@ class GitHub:
         """
         actors = await self._graphql(_SUGGESTED_ACTORS, {"o": self._owner, "n": repo})
         bot_id: Optional[str] = None
-        for node in actors["repository"]["suggestedActors"]["nodes"]:
-            if node.get("login") == _COPILOT_LOGIN:
-                bot_id = node.get("id")
-                break
+        try:
+            for node in actors["repository"]["suggestedActors"]["nodes"]:
+                if node.get("login") == _COPILOT_LOGIN:
+                    bot_id = node.get("id")
+                    break
+        except (AttributeError, KeyError, TypeError):
+            raise self._error("Copilot actor lookup returned an unexpected response") from None
         if not bot_id:
             log.warning("Copilot agent not assignable on %s/%s", self._owner, repo)
             return False
         issue = await self._graphql(_ISSUE_ID, {"o": self._owner, "n": repo, "num": num})
-        issue_id = issue["repository"]["issue"]["id"]
+        try:
+            issue_id = issue["repository"]["issue"]["id"]
+        except (KeyError, TypeError):
+            raise self._error("Issue lookup returned an unexpected response") from None
         await self._graphql(_REPLACE_ACTORS, {"a": issue_id, "b": bot_id})
         return True
 
@@ -173,12 +204,11 @@ class GitHub:
 
     async def approve_pr(self, repo: str, num: int, body: str = "") -> None:
         """Submit an APPROVE review on a PR (as the PAT user, who is not the author)."""
-        resp = await self._client.post(
+        await self._request(
+            "POST",
             f"{_REST}/repos/{self._owner}/{repo}/pulls/{num}/reviews",
-            headers=self._headers,
             json={"event": "APPROVE", "body": body or "Approved via Telegram."},
         )
-        resp.raise_for_status()
 
     async def checks_state(self, repo: str, num: int) -> ChecksState:
         """Resolve the CI rollup for a PR's head commit.
@@ -216,15 +246,13 @@ class GitHub:
         }
         """
         try:
-            resp = await self._client.post(
-                _GRAPHQL,
-                headers=self._headers,
+            resp = await self._request(
+                "POST", _GRAPHQL,
                 json={
                     "query": query,
                     "variables": {"o": self._owner, "n": repo, "num": num},
                 },
             )
-            resp.raise_for_status()
             payload = resp.json()
         except (httpx.HTTPError, ValueError) as exc:
             # Fail closed at the call site: an unresolvable rollup must not read as green.
@@ -284,10 +312,9 @@ class GitHub:
         body: dict[str, Any] = {"merge_method": method}
         if sha:
             body["sha"] = sha
-        resp = await self._client.put(
-            f"{_REST}/repos/{self._owner}/{repo}/pulls/{num}/merge",
-            headers=self._headers,
-            json=body,
+        resp = await self._request(
+            "PUT", f"{_REST}/repos/{self._owner}/{repo}/pulls/{num}/merge",
+            check_status=False, json=body,
         )
         try:
             receipt = resp.json()
@@ -296,15 +323,17 @@ class GitHub:
         if resp.status_code == 200:
             if isinstance(receipt, dict) and receipt.get("merged") is True:
                 return True, "merged"
-            return False, "200: merge not confirmed by GitHub's response"
+            detail = "200: merge not confirmed by GitHub's response"
+            log.error("merge_pr failed for %s#%s: %s", repo, num, detail)
+            return False, detail
+        log.error("merge_pr failed for %s#%s: HTTP %s", repo, num, resp.status_code)
         detail = receipt.get("message", resp.text) if isinstance(receipt, dict) else resp.text
         return False, f"{resp.status_code}: {detail}"
 
     async def close_pr(self, repo: str, num: int) -> None:
         """Close a PR without merging (the 👎 path)."""
-        resp = await self._client.patch(
+        await self._request(
+            "PATCH",
             f"{_REST}/repos/{self._owner}/{repo}/pulls/{num}",
-            headers=self._headers,
             json={"state": "closed"},
         )
-        resp.raise_for_status()
