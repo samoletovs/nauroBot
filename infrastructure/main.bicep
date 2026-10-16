@@ -37,7 +37,11 @@ param functionPlanName string = 'ASP-naurobotrg-302e'
 @description('Blob container holding the Flex deployment package')
 param deploymentContainerName string = 'app-package-naurobotfunctu72uwipcdj2sb-9005431'
 
+@description('True when the Function App already exists. Its live app settings are then merged under the declared ones, so secrets set out of band survive a redeploy. Pass false only when creating the app.')
+param appExists bool = true
+
 var suffix = uniqueString(resourceGroup().id)
+var functionAppName = '${projectName}-func-${suffix}${instanceId}'
 var tags = {
   project: projectName
   managedBy: 'bicep'
@@ -82,6 +86,29 @@ resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/con
 
 var storageConnection = 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storage.listKeys().keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
 
+// siteConfig.appSettings replaces the whole set, so read the live settings first and let the
+// declared values win. Blank secret params are dropped rather than written, so a plain
+// redeploy keeps the live secrets instead of erasing them.
+var declaredAppSettings = filter([
+  { name: 'AzureWebJobsStorage', value: storageConnection }
+  { name: 'DEPLOYMENT_STORAGE_CONNECTION_STRING', value: storageConnection }
+  { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: monitoring.outputs.connectionString }
+  { name: 'NAURO_BOT_TOKEN', value: botToken }
+  { name: 'TELEGRAM_WEBHOOK_SECRET', value: webhookSecret }
+  { name: 'GH_ASSIGN_PAT', value: githubPat }
+  { name: 'NAURO_CHAT_ID', value: allowedChatId }
+  { name: 'NAURO_GITHUB_OWNER', value: githubOwner }
+], s => !empty(s.value))
+var liveAppSettings = liveSettings.outputs.settings
+var appSettings = map(items(union(liveAppSettings, toObject(declaredAppSettings, s => s.name, s => s.value))), s => { name: s.key, value: s.value })
+
+module liveSettings 'modules/live-app-settings.bicep' = {
+  name: 'live-app-settings-${projectName}'
+  params: {
+    functionAppName: functionAppName
+    appExists: appExists
+  }
+}
 
 // ── Function App (Flex Consumption, Python 3.11). Stateless webhook, so the
 //    instance's ephemeral disk is fine. ──
@@ -95,7 +122,7 @@ resource plan 'Microsoft.Web/serverfarms@2024-04-01' = {
 }
 
 resource func 'Microsoft.Web/sites@2024-04-01' = {
-  name: '${projectName}-func-${suffix}${instanceId}'
+  name: functionAppName
   location: location
   tags: tags
   kind: 'functionapp,linux'
@@ -121,16 +148,7 @@ resource func 'Microsoft.Web/sites@2024-04-01' = {
     siteConfig: {
       ftpsState: 'Disabled'
       minTlsVersion: '1.2'
-      appSettings: [
-        { name: 'AzureWebJobsStorage', value: storageConnection }
-        { name: 'DEPLOYMENT_STORAGE_CONNECTION_STRING', value: storageConnection }
-        { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: monitoring.outputs.connectionString }
-        { name: 'NAURO_BOT_TOKEN', value: botToken }
-        { name: 'TELEGRAM_WEBHOOK_SECRET', value: webhookSecret }
-        { name: 'GH_ASSIGN_PAT', value: githubPat }
-        { name: 'NAURO_CHAT_ID', value: allowedChatId }
-        { name: 'NAURO_GITHUB_OWNER', value: githubOwner }
-      ]
+      appSettings: appSettings
     }
   }
 }
