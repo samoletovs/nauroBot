@@ -2,7 +2,7 @@
 # the webhook. Run from the repo root: pwsh ./deploy.ps1
 #
 # The GitHub issue is the state store for the feedback loop, so the Function App runs on the
-# cheap Y1 Consumption plan. Secret app settings are set once, after the first deploy; then
+# Flex Consumption plan (FC1). Secret app settings are set once, after the first deploy; then
 # the Telegram webhook is registered so taps/replies reach the endpoint.
 param(
     [string]$ResourceGroup = "naurobot-rg",
