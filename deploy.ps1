@@ -6,7 +6,9 @@
 # the Telegram webhook is registered so taps/replies reach the endpoint.
 param(
     [string]$ResourceGroup = "naurobot-rg",
-    [string]$Location = "northeurope"
+    [string]$Location = "northeurope",
+    # Must match the template's instanceId; change both only when deploying a fresh instance.
+    [string]$InstanceId = "b"
 )
 $ErrorActionPreference = "Stop"
 
@@ -18,8 +20,15 @@ Pop-Location
 
 Write-Host "== Infrastructure (Bicep) ==" -ForegroundColor Cyan
 az group create -n $ResourceGroup -l $Location -o none
+# Bicep merges live app settings into its own, so secrets set out of band survive a
+# redeploy. Reading them needs the app to exist; tell the template whether it does.
+# A failed lookup must stop the deploy: treating it as "no app" would wipe the settings.
+$sitesJson = az resource list -g $ResourceGroup --resource-type Microsoft.Web/sites -o json
+if ($LASTEXITCODE -ne 0) { Write-Error "could not list Function Apps in $ResourceGroup - aborting"; exit 1 }
+$appExists = [bool]($sitesJson | ConvertFrom-Json | Where-Object { $_.name -match '^naurobot-func-[a-z0-9]{13}' + [regex]::Escape($InstanceId) + '$' })
 $outputs = az deployment group create -g $ResourceGroup -n naurobot-deploy `
     --template-file "$PSScriptRoot/infrastructure/main.bicep" `
+    --parameters appExists=$($appExists.ToString().ToLower()) instanceId=$InstanceId `
     --query "properties.outputs" -o json | ConvertFrom-Json
 $funcApp = $outputs.functionAppName.value
 $webhookUrl = $outputs.webhookUrl.value
