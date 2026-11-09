@@ -60,6 +60,11 @@ python -m unittest discover tests
 
 All tests are offline and mock Telegram and GitHub.
 
+Failed Telegram message sends and button updates trigger one plain-text failure notice
+to the same chat, without exposing API details. This is best-effort: if Telegram also
+rejects the notice (for example during an outage), it is logged without further retries.
+The webhook still returns normally; a failure notice does not mean a GitHub action failed.
+
 PR approval and merge receipts are tracked separately. If both operations fail, the bot
 does not claim approval. A confirmed merge can still be reported when the approval-review
 request failed, but its audit comment names that distinction. HTTP 200 alone is not a
