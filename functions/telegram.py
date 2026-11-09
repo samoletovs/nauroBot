@@ -43,7 +43,21 @@ class Telegram:
             detail = status if status is not None else type(exc).__name__
         if detail is not None:
             raise TelegramError(f"{method} failed: {detail}")
-        return resp.json()
+        data = None
+        try:
+            data = resp.json()
+        except ValueError:
+            pass
+        if not isinstance(data, dict) or data.get("ok") is not True:
+            raise TelegramError(f"{method} failed: invalid or unsuccessful Telegram response")
+        return data
+
+    async def _notify_failure(self, chat_id: Any, text: str) -> None:
+        """Try once, without retrying or recursively notifying if Telegram is unavailable."""
+        try:
+            await self._call("sendMessage", {"chat_id": chat_id, "text": text})
+        except Exception:
+            log.exception("Telegram failure notification failed")
 
     async def answer_callback(self, callback_id: str, text: str = "") -> None:
         """Acknowledge a button tap (stops the Telegram spinner, shows an optional toast)."""
@@ -77,6 +91,10 @@ class Telegram:
             return data.get("result", {}).get("message_id")
         except Exception:
             log.exception("sendMessage failed")
+            await self._notify_failure(
+                chat_id,
+                "Sorry, I couldn't send a message. Check the conversation before trying again.",
+            )
             return None
 
     async def edit_reply_markup(
@@ -94,3 +112,8 @@ class Telegram:
             )
         except Exception:
             log.exception("editMessageReplyMarkup failed")
+            await self._notify_failure(
+                chat_id,
+                "Sorry, I couldn't update the message buttons. "
+                "They may be out of date; check GitHub before tapping again.",
+            )
