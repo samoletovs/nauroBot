@@ -158,6 +158,12 @@ async def _approve_pr(
                 "Nothing here can turn green, so I will not merge it unattended. "
                 "Review and merge it on GitHub if you intend to ship it.",
             ),
+            "unverified": (
+                "every CI check on this PR was skipped",
+                "GitHub shows that as green, but nothing ran against this change, so I "
+                "will not merge it unattended. Review and merge it on GitHub if you "
+                "intend to ship it.",
+            ),
             "unknown": (
                 "I could not read the CI status",
                 "Treating that as not-green on purpose. Check the PR on GitHub.",
