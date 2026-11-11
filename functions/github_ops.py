@@ -61,6 +61,29 @@ _ROLLUP_STATES = {
 }
 
 
+def _succeeded_contexts(contexts: object) -> tuple[int | None, int, int]:
+    """Return (checks that concluded SUCCESS, total, listed) from a rollup's contexts.
+
+    ``None`` for the first element means the list was unreadable, which the caller
+    treats as ``unknown``: a green rollup whose checks cannot be inspected is not
+    evidence that anything ran.
+    """
+    if not isinstance(contexts, dict):
+        return None, 0, 0
+    nodes = contexts.get("nodes")
+    total = contexts.get("totalCount")
+    if not isinstance(nodes, list) or not isinstance(total, int):
+        return None, 0, 0
+    succeeded = sum(
+        1 for node in nodes
+        if isinstance(node, dict) and (
+            (node.get("__typename") == "CheckRun" and node.get("conclusion") == "SUCCESS")
+            or (node.get("__typename") == "StatusContext" and node.get("state") == "SUCCESS")
+        )
+    )
+    return succeeded, total, len(nodes)
+
+
 class ChecksState(NamedTuple):
     """A CI verdict, and the exact commit it was read from.
 
@@ -213,7 +236,8 @@ class GitHub:
     async def checks_state(self, repo: str, num: int) -> ChecksState:
         """Resolve the CI rollup for a PR's head commit.
 
-        ``state`` is one of ``passing`` / ``failing`` / ``pending`` / ``none`` / ``unknown``.
+        ``state`` is one of ``passing`` / ``failing`` / ``pending`` / ``none`` /
+        ``unverified`` / ``unknown``.
 
         This is a **client-side** gate and it is not redundant with GitHub's own 405.
         Relying on the 405 assumes the target repo has branch protection with required
@@ -225,13 +249,14 @@ class GitHub:
         ``none`` (a PR with no checks at all) is deliberately *not* treated as passing;
         the caller decides, so a repo without CI cannot silently look green.
 
-        **What ``passing`` does and does not prove.** It proves GitHub's own aggregate for
-        the head commit is green — the same thing a human sees before clicking Merge. It
-        does *not* prove that any particular workflow ran: GitHub folds ``SKIPPED`` and
+        **What ``passing`` does and does not prove.** GitHub folds ``SKIPPED`` and
         ``NEUTRAL`` conclusions into a ``SUCCESS`` rollup, so a PR whose every check was
-        skipped reads green here exactly as it does on the PR page. Closing that gap needs
-        a per-repo list of required contexts to verify by name; tracked separately, and
-        deliberately not smuggled in as a default here.
+        skipped (a path filter matched nothing, or a job gated on the actor) reads green
+        on the PR page. Here it is ``unverified``: ``passing`` additionally requires at
+        least one check run or status that itself concluded ``SUCCESS``. It still does
+        *not* prove that a *particular* workflow ran; that needs per-repo required
+        contexts, which the lab deliberately does not configure (no branch protection,
+        decided 2026-11).
         """
         query = """
         query($o:String!,$n:String!,$num:Int!){
@@ -239,7 +264,17 @@ class GitHub:
             pullRequest(number:$num){
               commits(last:1){ nodes{ commit{
                 oid
-                statusCheckRollup{ state }
+                statusCheckRollup{
+                  state
+                  contexts(first:100){
+                    totalCount
+                    nodes{
+                      __typename
+                      ... on CheckRun{ conclusion }
+                      ... on StatusContext{ state }
+                    }
+                  }
+                }
               } } }
             }
           }
@@ -281,6 +316,7 @@ class GitHub:
             if rollup is None:
                 return ChecksState("none", "no checks configured on the head commit", sha)
             state = rollup["state"]
+            contexts = rollup.get("contexts")
         except (AttributeError, KeyError, IndexError, TypeError) as exc:
             # Every unexpected shape lands here, and every one of them is `unknown`.
             # This is why the whole parse sits inside the try rather than only the
@@ -293,6 +329,19 @@ class GitHub:
             # Green but unpinnable: we could not name the commit we just judged, so the
             # merge could not be pinned to it. Refuse rather than merge an unnamed head.
             return ChecksState("unknown", "rollup was green but the head commit had no oid")
+        if verdict == "passing":
+            succeeded, total, listed = _succeeded_contexts(contexts)
+            if succeeded is None:
+                return ChecksState("unknown", "rollup was green but its checks were unreadable", sha)
+            if not succeeded:
+                if total > listed:
+                    return ChecksState(
+                        "unknown", f"none of the first {listed} of {total} checks succeeded", sha)
+                return ChecksState(
+                    "unverified",
+                    f"all {total} check(s) were skipped or neutral — nothing ran against it",
+                    sha,
+                )
         return ChecksState(verdict, str(state) if state else "empty state", sha)
 
     async def merge_pr(

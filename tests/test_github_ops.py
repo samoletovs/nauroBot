@@ -11,6 +11,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "functions"))
 from github_ops import GitHub, GitHubError  # noqa: E402
 
 
+def _contexts(*checks):
+    """A rollup's ``contexts`` block from (typename, conclusion-or-state) pairs."""
+    nodes = [{"__typename": kind, "conclusion" if kind == "CheckRun" else "state": value}
+             for kind, value in checks]
+    return {"totalCount": len(nodes), "nodes": nodes}
+
+
 class AssignCopilotTests(unittest.IsolatedAsyncioTestCase):
     async def _run_assign(self, actor_login):
         calls = []
@@ -228,13 +235,35 @@ class ChecksStateTests(unittest.IsolatedAsyncioTestCase):
             gh = GitHub("tok", "samoletovs", client)
             return await gh.checks_state("era", 12)
 
-    def _rollup(self, state):
+    def _rollup(self, state, contexts=None):
+        if contexts is None:
+            contexts = _contexts(("CheckRun", "SUCCESS"))
         return httpx.Response(200, json={"data": {"repository": {"pullRequest": {
             "commits": {"nodes": [{"commit": {
-                "oid": "c0ffee", "statusCheckRollup": {"state": state}}}]}}}}})
+                "oid": "c0ffee",
+                "statusCheckRollup": {"state": state, "contexts": contexts}}}]}}}}})
 
     async def test_success_is_passing(self):
         self.assertEqual((await self._state(self._rollup("SUCCESS")))[0], "passing")
+
+    async def test_a_green_rollup_where_nothing_ran_is_not_passing(self):
+        # GitHub folds SKIPPED and NEUTRAL into a SUCCESS rollup, so this is the body a
+        # PR receives when a path filter or an actor gate skipped every job.
+        nothing_ran = _contexts(("CheckRun", "SKIPPED"), ("CheckRun", "NEUTRAL"))
+        checks = await self._state(self._rollup("SUCCESS", nothing_ran))
+        self.assertEqual(checks.state, "unverified")
+        self.assertIn("skipped", checks.detail)
+
+    async def test_one_real_success_among_skips_is_passing(self):
+        mixed = _contexts(("CheckRun", "SKIPPED"), ("StatusContext", "SUCCESS"))
+        self.assertEqual((await self._state(self._rollup("SUCCESS", mixed))).state, "passing")
+
+    async def test_green_rollup_with_unreadable_checks_is_not_passing(self):
+        for contexts in ({}, {"nodes": None, "totalCount": 1}, "SUCCESS",
+                         {"nodes": [], "totalCount": 250}):
+            with self.subTest(contexts=contexts):
+                state = (await self._state(self._rollup("SUCCESS", contexts))).state
+                self.assertEqual(state, "unknown")
 
     async def test_failure_is_failing(self):
         self.assertEqual((await self._state(self._rollup("FAILURE")))[0], "failing")
@@ -344,11 +373,9 @@ class ChecksStateTests(unittest.IsolatedAsyncioTestCase):
         the state table, including for a GitHub enum member that does not exist yet.
 
         Note what this does *not* claim. These are `StatusState` values, the layer the
-        gate actually reads. GitHub folds SKIPPED and NEUTRAL check *conclusions* into a
-        SUCCESS rollup, so a PR whose every check skipped arrives here as SUCCESS and is
-        green — the same as it looks on the PR page. Catching that needs per-repo required
-        contexts checked by name; asserting SKIPPED here instead would test a response
-        GitHub never sends and buy false confidence.
+        rollup reports. GitHub folds SKIPPED and NEUTRAL check *conclusions* into a
+        SUCCESS rollup; that case is caught one layer down, from the individual checks
+        (test_a_green_rollup_where_nothing_ran_is_not_passing).
         """
         never_green = [
             "FAILURE", "ERROR", "PENDING", "EXPECTED",

@@ -315,17 +315,21 @@ class PrMergeWireTests(unittest.IsolatedAsyncioTestCase):
             "message": {"message_id": 7, "chat": {"id": 42}, "text": "PR\narfpr:era:12"},
         }}
 
-    async def _tap_approve(self, rollup_state):
+    async def _tap_approve(self, rollup_state, conclusions=("SUCCESS",)):
         requests = []
 
         def handler(request):
             requests.append(request)
             if request.url.path == "/graphql":
+                nodes = [{"__typename": "CheckRun", "conclusion": c} for c in conclusions]
                 return httpx.Response(200, json={"data": {"repository": {"pullRequest": {
                     "commits": {"nodes": [{"commit": {
                         "oid": "c0ffee",
                         "statusCheckRollup": (
-                            None if rollup_state is None else {"state": rollup_state}
+                            None if rollup_state is None else {
+                                "state": rollup_state,
+                                "contexts": {"totalCount": len(nodes), "nodes": nodes},
+                            }
                         ),
                     }}]}}}}})
             return httpx.Response(200, json={"merged": True, "id": 1})
@@ -348,6 +352,13 @@ class PrMergeWireTests(unittest.IsolatedAsyncioTestCase):
         result, requests = await self._tap_approve(None)
         self.assertEqual(result["action"], "merge_refused")
         self.assertEqual([r for r in requests if r.method == "PUT"], [])
+
+    async def test_green_rollup_where_every_check_skipped_issues_no_merge_request(self):
+        result, requests = await self._tap_approve("SUCCESS", ("SKIPPED", "SKIPPED"))
+        self.assertEqual(result["action"], "merge_refused")
+        self.assertEqual(result["checks"], "unverified")
+        self.assertEqual([r for r in requests if r.method == "PUT"], [])
+        self.assertEqual([r for r in requests if "/reviews" in r.url.path], [])
 
     async def test_green_rollup_merges_pinned_to_the_checked_commit(self):
         result, requests = await self._tap_approve("SUCCESS")
